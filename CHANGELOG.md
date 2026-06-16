@@ -9,6 +9,15 @@ Releases are cut by pushing a `v*` tag, which builds the Windows
 installers and publishes a GitHub Release (see
 [`.github/workflows/release.yml`](.github/workflows/release.yml)).
 
+## [0.5.0] - 2026-06-17
+
+### Added
+
+- **Reorder lists.** Drag a list by the grip in its header to move it
+  left or right, or use "Move left / right" in the list menu. The new
+  order is undoable with Ctrl+Z and syncs live to the MCP server and any
+  other open window, like every other edit.
+
 ## [0.4.0] - 2026-06-11
 
 ### Added
