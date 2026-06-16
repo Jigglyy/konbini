@@ -128,6 +128,17 @@ export const zMutation = z.discriminatedUnion('type', [
     })
   }),
   z.object({ type: z.literal('list.delete'), id: z.string() }),
+  // Reorder a list within its board. Same fractional-index pattern as
+  // board.move / card.move: the server reads the two neighbour
+  // positions and mints a key between them. Both neighbours MUST be
+  // siblings on the same board (the renderer reorders the visible
+  // lists, which guarantees this); cross-board moves aren't supported.
+  z.object({
+    type: z.literal('list.move'),
+    id: z.string(),
+    beforeId: z.string().nullable().optional(),
+    afterId: z.string().nullable().optional()
+  }),
 
   // card. `id` optional for the undo recorder (ADR-0036).
   // `priority` optional - ADR-0037 slice 2 swimlane mode lets the

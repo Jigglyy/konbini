@@ -121,6 +121,7 @@ function entityIdOf(m: Mutation): string | null {
     case 'list.create':
     case 'list.update':
     case 'list.delete':
+    case 'list.move':
     case 'board.create':
     case 'board.update':
     case 'board.delete':
@@ -875,6 +876,8 @@ function describeMutation(m: Mutation): string {
       return `Edit list`
     case 'list.delete':
       return `Delete list`
+    case 'list.move':
+      return `Move list`
     case 'board.create':
       return `Create board "${m.name}"`
     case 'board.update':
@@ -1063,6 +1066,24 @@ export function inverseBefore(db: Db, m: Mutation): Mutation | null {
       const beforeId = siblings[myIdx - 1]?.id ?? null
       const afterId = siblings[myIdx + 1]?.id ?? null
       return { type: 'board.move', id: m.id, beforeId, afterId }
+    }
+    case 'list.move': {
+      const old = db
+        .select({ boardId: list.boardId })
+        .from(list)
+        .where(eq(list.id, m.id))
+        .get()
+      if (!old) return null
+      const siblings = db
+        .select({ id: list.id, position: list.position })
+        .from(list)
+        .where(eq(list.boardId, old.boardId))
+        .orderBy(asc(list.position))
+        .all()
+      const myIdx = siblings.findIndex((s) => s.id === m.id)
+      const beforeId = siblings[myIdx - 1]?.id ?? null
+      const afterId = siblings[myIdx + 1]?.id ?? null
+      return { type: 'list.move', id: m.id, beforeId, afterId }
     }
     case 'checklistItem.move': {
       const old = db

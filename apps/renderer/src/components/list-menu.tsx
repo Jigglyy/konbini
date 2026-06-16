@@ -75,7 +75,10 @@ export function ListEditor({
   list,
   apply,
   close,
-  onSaveAsTemplate
+  onSaveAsTemplate,
+  onMove,
+  canMoveLeft,
+  canMoveRight
 }: {
   list: ListView
   apply: Apply
@@ -83,6 +86,13 @@ export function ListEditor({
   /** Opens the save-as-template dialog (the host owns it because the
    *  Modal must outlive the ContextMenu, which unmounts on close). */
   onSaveAsTemplate?: () => void
+  /** Reorder this list left (-1) / right (+1). The keyboard / no-pointer
+   *  fallback for the header grip drag (mirrors the label bar editor).
+   *  Omitted where reordering isn't available; the booleans hide the
+   *  end-of-row direction. */
+  onMove?: (dir: -1 | 1) => void
+  canMoveLeft?: boolean
+  canMoveRight?: boolean
 }) {
   const [name, setName] = useState(list.name)
   const [wip, setWip] = useState(list.wipLimit?.toString() ?? '')
@@ -146,6 +156,34 @@ export function ListEditor({
         onBlur={rename}
         className="mx-1 rounded border border-border bg-background px-2 py-1 text-sm focus:border-ring focus:outline-none"
       />
+      {onMove && (
+        <>
+          <MenuSep />
+          <MenuLabel>Move</MenuLabel>
+          <div className="flex gap-1 px-2 py-1">
+            <button
+              disabled={!canMoveLeft}
+              onClick={() => {
+                onMove(-1)
+                close()
+              }}
+              className="flex-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+            >
+              ← Left
+            </button>
+            <button
+              disabled={!canMoveRight}
+              onClick={() => {
+                onMove(1)
+                close()
+              }}
+              className="flex-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+            >
+              Right →
+            </button>
+          </div>
+        </>
+      )}
       <MenuSep />
       <MenuLabel>Colour</MenuLabel>
       <div className="flex flex-wrap items-center gap-1.5 px-2 py-1">

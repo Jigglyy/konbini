@@ -32,6 +32,7 @@ const validExamples = [
     patch: { wipLimit: 5, closed: false }
   },
   { type: 'list.delete' as const, id: 'l1' },
+  { type: 'list.move' as const, id: 'l1', beforeId: 'l2', afterId: 'l3' },
   { type: 'card.create' as const, listId: 'l1', title: 'T' },
   {
     type: 'card.update' as const,

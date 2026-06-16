@@ -151,6 +151,21 @@ describe('board CRUD', () => {
     expect(names).toEqual(['A', 'C', 'B'])
   })
 
+  it('list.move places a list between two neighbours by fractional index', () => {
+    const board = applyMutation(db, { type: 'board.create', projectId, name: 'B' })
+    const a = applyMutation(db, { type: 'list.create', boardId: board.id, name: 'A' }).id
+    const b = applyMutation(db, { type: 'list.create', boardId: board.id, name: 'B' }).id
+    const c = applyMutation(db, { type: 'list.create', boardId: board.id, name: 'C' }).id
+    // Starting order: [A, B, C]. Move C to sit between A and B.
+    const r = applyMutation(db, { type: 'list.move', id: c, beforeId: a, afterId: b })
+    expect(r.boardId).toBe(board.id)
+    expect(getBoardView(db, board.id)?.lists.map((l) => l.name)).toEqual([
+      'A',
+      'C',
+      'B'
+    ])
+  })
+
   it('board.update accepts all three background kinds + clears with null', () => {
     const { boardId } = seedBoard()
     const cases = [

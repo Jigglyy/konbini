@@ -352,6 +352,40 @@ describe('undo log basics', () => {
     expect(v.lists.find((l) => l.id === second.id)?.cards).toEqual([])
   })
 
+  it('undo of list.move puts the list back in its original slot', () => {
+    const { boardId, listId } = seedBoard()
+    const b = applyMutationRecorded(db, {
+      type: 'list.create',
+      boardId,
+      name: 'L2'
+    }).id
+    const c = applyMutationRecorded(db, {
+      type: 'list.create',
+      boardId,
+      name: 'L3'
+    }).id
+    // Order: [L, L2, L3]. Move L3 to the front (before L).
+    applyMutationRecorded(db, { type: 'list.move', id: c, beforeId: null, afterId: listId })
+    expect(getBoardView(db, boardId)?.lists.map((l) => l.id)).toEqual([
+      c,
+      listId,
+      b
+    ])
+    expect(undoOne(db).applied).toBe(true)
+    expect(getBoardView(db, boardId)?.lists.map((l) => l.id)).toEqual([
+      listId,
+      b,
+      c
+    ])
+    // Redo re-applies the move.
+    expect(redoOne(db).applied).toBe(true)
+    expect(getBoardView(db, boardId)?.lists.map((l) => l.id)).toEqual([
+      c,
+      listId,
+      b
+    ])
+  })
+
   it('undo of card.setLabels restores the previous label set', () => {
     const { boardId, cardId } = seedBoard()
     const a = applyMutationRecorded(db, {

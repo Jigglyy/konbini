@@ -355,6 +355,36 @@ export function applyMutation(db: Db, m: Mutation): MutationResult {
       db.delete(list).where(eq(list.id, m.id)).run()
       return { id: m.id, boardId }
     }
+    case 'list.move': {
+      // Mirror board.move: read the two neighbour positions in a tx,
+      // mint a fractional key between them, write. The renderer
+      // reorders the visible lists, so beforeId/afterId are guaranteed
+      // siblings on this list's board - we scope the neighbour lookup
+      // to that board so a stray id from another board can't shift the
+      // computed key.
+      return db.transaction((tx) => {
+        const boardIdRow = tx
+          .select({ b: list.boardId })
+          .from(list)
+          .where(eq(list.id, m.id))
+          .get()
+        if (!boardIdRow) return { id: m.id, boardId: null }
+        const keyOf = (id: string | null | undefined): string | null =>
+          id
+            ? (tx
+                .select({ p: list.position })
+                .from(list)
+                .where(and(eq(list.id, id), eq(list.boardId, boardIdRow.b)))
+                .get()?.p ?? null)
+            : null
+        const position = orderKeyBetween(keyOf(m.beforeId), keyOf(m.afterId))
+        tx.update(list)
+          .set({ position, updatedAt: now() })
+          .where(eq(list.id, m.id))
+          .run()
+        return { id: m.id, boardId: boardIdRow.b }
+      })
+    }
 
     case 'card.create': {
       const id = m.id ?? newId()

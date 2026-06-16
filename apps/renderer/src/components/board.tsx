@@ -18,6 +18,9 @@ import {
   useDroppable,
   useSensor,
   useSensors,
+  type CollisionDetection,
+  type DraggableAttributes,
+  type DraggableSyntheticListeners,
   type DragEndEvent,
   type DragOverEvent,
   type DragStartEvent,
@@ -25,6 +28,7 @@ import {
 } from '@dnd-kit/core'
 import {
   SortableContext,
+  horizontalListSortingStrategy,
   useSortable,
   verticalListSortingStrategy
 } from '@dnd-kit/sortable'
@@ -33,6 +37,7 @@ import {
   ArrowDownUp,
   Check,
   Globe,
+  GripVertical,
   ListPlus,
   Pencil
 } from 'lucide-react'
@@ -98,8 +103,10 @@ import {
   isSortedListReorder,
   isUnchangedMove,
   listOf,
+  planListMove,
   planSwimlaneDrop,
-  reduceCardMove
+  reduceCardMove,
+  reorderVisibleLists
 } from '../lib/board-dnd'
 import {
   DROP_ANIMATION_DURATION_MS,
@@ -132,6 +139,17 @@ const REST_SHADOW =
 // Stable empty-selection identity so "no cards selected" never produces a
 // fresh Set each render (which would bust the memoised cards).
 const EMPTY_SELECTION: ReadonlySet<string> = new Set()
+
+// List reorder: the column sortable id is namespaced so it never
+// collides with a raw card id (card sortables) or the `list:<id>`
+// droppable (the card-drop target on the same column). The type-aware
+// collision detection keys off this prefix so a card drag never
+// resolves a column-reorder droppable and vice versa.
+const LIST_SORTABLE_PREFIX = 'listcol:'
+const isListSortableId = (id: string): boolean =>
+  id.startsWith(LIST_SORTABLE_PREFIX)
+const listIdFromSortable = (id: string): string =>
+  id.slice(LIST_SORTABLE_PREFIX.length)
 
 const DROP_ANIMATION: DropAnimation = {
   duration: DROP_ANIMATION_DURATION_MS,
@@ -464,6 +482,11 @@ export function Board({
   const key = boardKey(board.board.id)
   const snapshot = useRef<BoardView | null>(null)
   const [dragging, setDragging] = useState<CardView | null>(null)
+  // List-column reorder. Holds the id of the list being
+  // dragged so the DragOverlay can render a column preview; null when no
+  // list drag is in flight. Card drags leave this null (and list drags
+  // leave `dragging` null) so the two paths never interleave.
+  const [draggingListId, setDraggingListId] = useState<string | null>(null)
   // Multi-card drag: true while dragging a card that's part of a 2+
   // selection. The lead card follows the cursor (live reorder); the
   // other selected cards ghost in place and re-cluster at the drop spot
@@ -682,6 +705,74 @@ export function Board({
     },
     [key, qc]
   )
+
+  // --- List reorder ------------------------------------------------------
+  //
+  // Lists drag horizontally via a grip in each column header (ADR
+  // list-move). The dnd-kit machinery is shared with the card path: a
+  // single <DndContext>, but each handler branches on the active id's
+  // `listcol:` prefix so the carefully-tuned card logic is untouched.
+  // The optimistic order is written through the normal `apply` path so a
+  // list move undoes with Ctrl+Z like everything else.
+
+  // Stable list-sortable id array for the outer <SortableContext>. Keyed
+  // on the visible list ids' signature (NOT board.lists identity, which a
+  // card drag churns every onDragOver frame) so a card drag doesn't hand
+  // the list context a fresh array each frame.
+  const visibleListIdsSig = board.lists
+    .filter((l) => !l.closed)
+    .map((l) => l.id)
+    .join(' ')
+  const listColItemIds = useMemo(
+    () =>
+      visibleListIdsSig === ''
+        ? []
+        : visibleListIdsSig
+            .split(' ')
+            .map((id) => `${LIST_SORTABLE_PREFIX}${id}`),
+    [visibleListIdsSig]
+  )
+
+  /** Keyboard / menu fallback for list reorder (mirrors the label bar's
+   *  Move left/right). `dir` is -1 (left) / +1 (right). Reads the live
+   *  board off the ref so its identity stays stable for the memoised
+   *  ListColumns. */
+  const moveListByDir = useCallback(
+    (listId: string, dir: -1 | 1): void => {
+      const vis = boardRef.current.lists.filter((l) => !l.closed)
+      const idx = vis.findIndex((l) => l.id === listId)
+      const target = vis[idx + dir]
+      if (idx < 0 || !target) return
+      const plan = planListMove(vis.map((l) => l.id), listId, target.id)
+      if (!plan) return
+      apply(
+        {
+          type: 'list.move',
+          id: listId,
+          beforeId: plan.beforeId,
+          afterId: plan.afterId
+        },
+        (b) => ({ ...b, lists: reorderVisibleLists(b.lists, plan.orderedIds) })
+      )
+    },
+    [apply]
+  )
+
+  // Type-aware collision detection: a card drag only ever resolves card /
+  // `list:` / `lane:` droppables (never a `listcol:` column-reorder
+  // target), and a list drag only resolves `listcol:` targets. Filtering
+  // the candidate set keeps the card path byte-identical to before (those
+  // `listcol:` droppables simply didn't exist) while giving list drags a
+  // clean column-only field.
+  const collisionDetection = useCallback<CollisionDetection>((args) => {
+    const activeIsList = isListSortableId(String(args.active.id))
+    const droppableContainers = args.droppableContainers.filter((c) =>
+      activeIsList
+        ? isListSortableId(String(c.id))
+        : !isListSortableId(String(c.id))
+    )
+    return closestCorners({ ...args, droppableContainers })
+  }, [])
 
   // --- Multi-select click + bulk actions ---------------------------------
   //
@@ -1089,8 +1180,14 @@ export function Board({
   useShortcutDispatch(bindings, handlers)
 
   function onDragStart(e: DragStartEvent): void {
-    snapshot.current = qc.getQueryData<BoardView | null>(key) ?? null
     const activeId = String(e.active.id)
+    // List-column drag: record which list is moving (drives the overlay
+    // preview) and bail before any of the card-specific setup.
+    if (isListSortableId(activeId)) {
+      setDraggingListId(listIdFromSortable(activeId))
+      return
+    }
+    snapshot.current = qc.getQueryData<BoardView | null>(key) ?? null
     setDragging(findCard(activeId) ?? null)
     // Multi-card drag: grabbing one of 2+ selected cards drags the whole
     // selection. Capture the block in pre-drag board order (off the
@@ -1118,6 +1215,10 @@ export function Board({
   // final position (consistency) and siblings animate (no drop snap).
   function onDragOver(e: DragOverEvent): void {
     const { active, over } = e
+    // List-column drag: horizontalListSortingStrategy glides the sibling
+    // columns via pure CSS transforms, so there's nothing to reorder in
+    // the cache here. The final order is applied once on drop.
+    if (isListSortableId(String(active.id))) return
     if (!over) {
       setBlockedListId(null)
       return
@@ -1195,6 +1296,12 @@ export function Board({
   }
 
   function onDragEnd(e: DragEndEvent): void {
+    // List-column drag has its own persist path (no card snapshot /
+    // multi-select / hover bookkeeping applies).
+    if (isListSortableId(String(e.active.id))) {
+      onListDragEnd(e)
+      return
+    }
     setDragging(null)
     setBlockedListId(null)
     const isMulti = multiDragActive
@@ -1390,7 +1497,41 @@ export function Board({
       })
   }
 
+  /** List-column drag end. The strategy already glided the siblings, so
+   *  we just resolve the dropped-on column, compute the fractional-index
+   *  neighbours, and persist via the standard `apply` path (optimistic
+   *  reorder + undo-recorded list.move). */
+  function onListDragEnd(e: DragEndEvent): void {
+    setDraggingListId(null)
+    const { active, over } = e
+    if (!over) return
+    const overId = String(over.id)
+    if (!isListSortableId(overId)) return
+    const activeListId = listIdFromSortable(String(active.id))
+    const overListId = listIdFromSortable(overId)
+    const visibleIds = board.lists
+      .filter((l) => !l.closed)
+      .map((l) => l.id)
+    const plan = planListMove(visibleIds, activeListId, overListId)
+    if (!plan) return
+    apply(
+      {
+        type: 'list.move',
+        id: activeListId,
+        beforeId: plan.beforeId,
+        afterId: plan.afterId
+      },
+      (b) => ({ ...b, lists: reorderVisibleLists(b.lists, plan.orderedIds) })
+    )
+  }
+
   function onDragCancel(): void {
+    // A cancelled list drag just clears the overlay state - no cache was
+    // touched during the drag.
+    if (draggingListId) {
+      setDraggingListId(null)
+      return
+    }
     setDragging(null)
     setBlockedListId(null)
     setMultiDragActive(false)
@@ -1405,11 +1546,15 @@ export function Board({
     void qc.invalidateQueries({ queryKey: key })
   }
 
+  const draggingList = draggingListId
+    ? (board.lists.find((l) => l.id === draggingListId) ?? null)
+    : null
+
   return (
     <>
     <DndContext
       sensors={sensors}
-      collisionDetection={closestCorners}
+      collisionDetection={collisionDetection}
       onDragStart={onDragStart}
       onDragOver={onDragOver}
       onDragEnd={onDragEnd}
@@ -1504,27 +1649,35 @@ export function Board({
         }
         return (
           <div className="flex items-start gap-4">
-            {visibleLists.map((list) => (
-              <ListColumn
-                key={list.id}
-                list={list}
-                labels={board.labels}
-                apply={apply}
-                blockCreate={blockCreate}
-                blocked={blockedListId === list.id}
-                showChecklist={showChecklist}
-                labelsExpanded={labelsExpanded}
-                onToggleLabelsExpanded={onToggleLabelsExpanded}
-                anyDragging={dragging != null}
-                focusedCardId={focusedCardId}
-                selectedIds={selectedIds}
-                multiActive={multiSelectActive}
-                multiDragActive={multiDragActive}
-                onCardClick={onCardClick}
-                bulkMenu={renderBulkMenu}
-                postDropHoverMatch={postDropHoverMatch}
-              />
-            ))}
+            <SortableContext
+              items={listColItemIds}
+              strategy={horizontalListSortingStrategy}
+            >
+              {visibleLists.map((list, i) => (
+                <ListColumn
+                  key={list.id}
+                  list={list}
+                  labels={board.labels}
+                  apply={apply}
+                  blockCreate={blockCreate}
+                  blocked={blockedListId === list.id}
+                  showChecklist={showChecklist}
+                  labelsExpanded={labelsExpanded}
+                  onToggleLabelsExpanded={onToggleLabelsExpanded}
+                  anyDragging={dragging != null || draggingListId != null}
+                  focusedCardId={focusedCardId}
+                  selectedIds={selectedIds}
+                  multiActive={multiSelectActive}
+                  multiDragActive={multiDragActive}
+                  onCardClick={onCardClick}
+                  bulkMenu={renderBulkMenu}
+                  postDropHoverMatch={postDropHoverMatch}
+                  onMoveList={moveListByDir}
+                  canMoveLeft={i > 0}
+                  canMoveRight={i < visibleLists.length - 1}
+                />
+              ))}
+            </SortableContext>
             <AddList onAdd={addList} boardId={board.board.id} />
           </div>
         )
@@ -1603,6 +1756,25 @@ export function Board({
             )}
           </div>
         )}
+        {draggingList && (
+          // A static clone of the dragged column. dnd-kit sizes the
+          // overlay to the source column's rect, so the preview matches
+          // pixel-for-pixel; `zoom` mirrors App's board wrapper (the
+          // overlay is body-portaled, same caveat as the card overlay).
+          <div
+            className="cursor-grabbing"
+            style={
+              boardZoom !== 1 ? ({ zoom: boardZoom } as CSSProperties) : undefined
+            }
+          >
+            <ListColumnPreview
+              list={draggingList}
+              labels={board.labels}
+              showChecklist={showChecklist}
+              labelsExpanded={labelsExpanded}
+            />
+          </div>
+        )}
       </DragOverlay>
     </DndContext>
     <SelectionBar actions={bulkActions} />
@@ -1637,10 +1809,24 @@ const SORT_CHIP: Record<ListSortMode, { short: string; full: string }> = {
  *  container (`w-72` in both kanban layouts today). */
 export function ListHeader({
   list,
-  apply
+  apply,
+  dragListeners,
+  dragAttributes,
+  onMove,
+  canMoveLeft,
+  canMoveRight
 }: {
   list: BoardView['lists'][number]
   apply: (m: Mutation, o: Optimistic) => void
+  /** dnd-kit handle props for the reorder grip. When omitted (e.g. the
+   *  swimlane header row) no grip renders and the column isn't
+   *  drag-reorderable from here. */
+  dragListeners?: DraggableSyntheticListeners
+  dragAttributes?: DraggableAttributes
+  /** Menu fallback for reorder (no-pointer / keyboard path). */
+  onMove?: (dir: -1 | 1) => void
+  canMoveLeft?: boolean
+  canMoveRight?: boolean
 }) {
   const atLimit =
     list.wipLimit != null && list.cards.length >= list.wipLimit
@@ -1655,6 +1841,9 @@ export function ListHeader({
           apply={apply}
           close={close}
           onSaveAsTemplate={() => setSaveTplOpen(true)}
+          onMove={onMove}
+          canMoveLeft={canMoveLeft}
+          canMoveRight={canMoveRight}
         />
       )}
     >
@@ -1668,6 +1857,21 @@ export function ListHeader({
           }
           className="flex items-center gap-2 px-3 py-2 text-sm font-medium"
         >
+          {dragListeners && (
+            // Reorder grip. The whole-column sortable activates from here
+            // (the listeners live on this button, not the section) so a
+            // drag never starts from a card or the header text. The 6 px
+            // PointerSensor distance still lets a plain click through.
+            <button
+              {...dragAttributes}
+              {...dragListeners}
+              aria-label={`Reorder list "${list.name}"`}
+              title="Drag to reorder list"
+              className="-ml-1 shrink-0 cursor-grab touch-none rounded text-muted-foreground/60 hover:text-foreground active:cursor-grabbing"
+            >
+              <GripVertical className="size-4" />
+            </button>
+          )}
           <span className="flex-1 truncate">{list.name}</span>
           {list.sortMode && (
             <span
@@ -1725,7 +1929,10 @@ const ListColumn = memo(function ListColumn({
   multiDragActive,
   onCardClick,
   bulkMenu,
-  postDropHoverMatch
+  postDropHoverMatch,
+  onMoveList,
+  canMoveLeft,
+  canMoveRight
 }: {
   list: BoardView['lists'][number]
   labels: LabelView[]
@@ -1762,8 +1969,44 @@ const ListColumn = memo(function ListColumn({
    *  a 150 ms :hover transition. See Board's postDropHoverMatch
    *  comment for the full rationale. */
   postDropHoverMatch: boolean
+  /** List reorder (header grip drag + the menu fallback). `onMoveList`
+   *  is Board's stable handler; the booleans gate the menu's Move
+   *  left/right at the ends. Omitted in layouts that don't reorder. */
+  onMoveList?: (id: string, dir: -1 | 1) => void
+  canMoveLeft?: boolean
+  canMoveRight?: boolean
 }) {
-  const { setNodeRef, isOver } = useDroppable({ id: `list:${list.id}` })
+  const { setNodeRef: setDroppableRef, isOver } = useDroppable({
+    id: `list:${list.id}`
+  })
+  // The whole column is a horizontal sortable. The grip
+  // in the header is the activator (listeners spread there); the section
+  // gets the sort transform so siblings glide as it's dragged. isDragging
+  // hides the source while the DragOverlay shows the column preview.
+  const {
+    setNodeRef: setSortableRef,
+    transform,
+    transition,
+    isDragging: isListDragging,
+    listeners: dragListeners,
+    attributes: dragAttributes
+  } = useSortable({
+    id: `${LIST_SORTABLE_PREFIX}${list.id}`,
+    animateLayoutChanges: ({ isSorting }) => isSorting,
+    transition: {
+      duration: DROP_ANIMATION_DURATION_MS,
+      easing: 'cubic-bezier(0.22, 1, 0.36, 1)'
+    }
+  })
+  // Tee both dnd-kit refs (card-drop droppable + list sortable) onto the
+  // one <section> node.
+  const setSectionRef = useCallback(
+    (node: HTMLElement | null): void => {
+      setDroppableRef(node)
+      setSortableRef(node)
+    },
+    [setDroppableRef, setSortableRef]
+  )
   // At/over the card limit: the badge tints, and (when the setting is
   // on) the add-card box is blocked.
   const atLimit =
@@ -1793,15 +2036,27 @@ const ListColumn = memo(function ListColumn({
   const itemIds = useMemo(() => list.cards.map((c) => c.id), [list.cards])
   return (
     <section
-      ref={setNodeRef}
-      style={list.color ? { borderColor: list.color } : undefined}
+      ref={setSectionRef}
+      style={{
+        ...(list.color ? { borderColor: list.color } : null),
+        transform: CSS.Transform.toString(transform),
+        transition
+      }}
       className={`flex w-72 shrink-0 flex-col overflow-hidden rounded-lg border pb-1 transition-colors ${
         list.color ? '' : 'border-border'
       } ${isOver ? 'bg-muted' : 'bg-muted/60'} ${
         blocked ? 'ring-2 ring-red-400/70' : ''
-      } ${shakeClass}`}
+      } ${isListDragging ? 'opacity-0' : ''} ${shakeClass}`}
     >
-      <ListHeader list={list} apply={apply} />
+      <ListHeader
+        list={list}
+        apply={apply}
+        dragListeners={dragListeners}
+        dragAttributes={dragAttributes}
+        onMove={onMoveList ? (dir) => onMoveList(list.id, dir) : undefined}
+        canMoveLeft={canMoveLeft}
+        canMoveRight={canMoveRight}
+      />
 
       <SortableContext
         items={itemIds}
@@ -1866,6 +2121,58 @@ const ListColumn = memo(function ListColumn({
     </section>
   )
 })
+
+/** Static clone of a list column, rendered inside the DragOverlay while a
+ *  list is being reordered. No dnd-kit hooks / droppables (the overlay
+ *  must not register drag nodes) and no interactive chrome - just the
+ *  header strip + the cards as static CardFaces so the floating column
+ *  reads like the real one. dnd-kit sizes the overlay to the source
+ *  column's rect, so this matches it. */
+function ListColumnPreview({
+  list,
+  labels,
+  showChecklist,
+  labelsExpanded
+}: {
+  list: BoardView['lists'][number]
+  labels: LabelView[]
+  showChecklist: boolean
+  labelsExpanded?: boolean
+}) {
+  return (
+    <section
+      style={list.color ? { borderColor: list.color } : undefined}
+      className={`flex w-72 shrink-0 flex-col overflow-hidden rounded-lg border bg-muted pb-1 ${
+        list.color ? '' : 'border-border'
+      }`}
+    >
+      <h2
+        style={
+          list.color
+            ? { backgroundColor: tint(list.color, 45, 'var(--color-background)') }
+            : undefined
+        }
+        className="flex items-center gap-2 px-3 py-2 text-sm font-medium"
+      >
+        <GripVertical className="-ml-1 size-4 shrink-0 text-muted-foreground/60" />
+        <span className="flex-1 truncate">{list.name}</span>
+        <span className="text-xs text-muted-foreground">{list.cards.length}</span>
+      </h2>
+      <ul className="flex flex-col gap-2 px-2 pt-2">
+        {list.cards.map((card) => (
+          <li key={card.id}>
+            <CardFace
+              card={card}
+              labels={labels}
+              showChecklist={showChecklist}
+              labelsExpanded={labelsExpanded}
+            />
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
 
 const SortableCard = memo(function SortableCard({
   card,

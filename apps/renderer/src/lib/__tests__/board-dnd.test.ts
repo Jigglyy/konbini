@@ -8,8 +8,10 @@ import {
   isUnchangedMove,
   laneOf,
   listOf,
+  planListMove,
   planSwimlaneDrop,
-  reduceCardMove
+  reduceCardMove,
+  reorderVisibleLists
 } from '../board-dnd'
 import {
   laneKeyOfCard,
@@ -828,5 +830,68 @@ describe('findNextNonEmptyListIndex', () => {
     const lists = [list(2), list(0), list(0), list(1)]
     expect(findNextNonEmptyListIndex(lists, 1, 1)).toBe(3)
     expect(findNextNonEmptyListIndex(lists, 2, -1)).toBe(0)
+  })
+})
+
+describe('planListMove', () => {
+  it('moving a list earlier puts it between the right neighbours', () => {
+    // [a, b, c, d]: move c before b → [a, c, b, d].
+    const plan = planListMove(['a', 'b', 'c', 'd'], 'c', 'b')
+    expect(plan).toEqual({
+      orderedIds: ['a', 'c', 'b', 'd'],
+      beforeId: 'a',
+      afterId: 'b'
+    })
+  })
+
+  it('moving a list later puts it between the right neighbours', () => {
+    // [a, b, c, d]: move a onto c → [b, c, a, d].
+    const plan = planListMove(['a', 'b', 'c', 'd'], 'a', 'c')
+    expect(plan).toEqual({
+      orderedIds: ['b', 'c', 'a', 'd'],
+      beforeId: 'c',
+      afterId: 'd'
+    })
+  })
+
+  it('moving to the front has a null beforeId; to the end a null afterId', () => {
+    expect(planListMove(['a', 'b', 'c'], 'c', 'a')).toEqual({
+      orderedIds: ['c', 'a', 'b'],
+      beforeId: null,
+      afterId: 'a'
+    })
+    expect(planListMove(['a', 'b', 'c'], 'a', 'c')).toEqual({
+      orderedIds: ['b', 'c', 'a'],
+      beforeId: 'c',
+      afterId: null
+    })
+  })
+
+  it('returns null for a no-op (same id) or an unknown id', () => {
+    expect(planListMove(['a', 'b'], 'a', 'a')).toBeNull()
+    expect(planListMove(['a', 'b'], 'x', 'a')).toBeNull()
+    expect(planListMove(['a', 'b'], 'a', 'x')).toBeNull()
+  })
+})
+
+describe('reorderVisibleLists', () => {
+  const L = (id: string) => ({ id })
+
+  it('reorders the visible lists to follow the given id order', () => {
+    const lists = [L('a'), L('b'), L('c')]
+    expect(reorderVisibleLists(lists, ['c', 'a', 'b']).map((l) => l.id)).toEqual([
+      'c',
+      'a',
+      'b'
+    ])
+  })
+
+  it('keeps lists outside the visible set (e.g. closed) after the block, in original order', () => {
+    // `closed1` / `closed2` aren't in the visible order; they stay in
+    // their relative order, sorted after the reordered visible block.
+    const lists = [L('a'), L('closed1'), L('b'), L('closed2'), L('c')]
+    expect(
+      reorderVisibleLists(lists, ['c', 'b', 'a']).map((l) => l.id)
+    ).toEqual(['c', 'b', 'a', 'closed1', 'closed2'])
   })
 })

@@ -244,6 +244,62 @@ export function isUnchangedMove(
   )
 }
 
+// ─── list reorder ─────────────────────────────────────────────────
+// Dragging a whole list column (horizontal reorder). Pure helpers so
+// the index math + the optimistic board projection are unit-testable
+// without a <DndContext>. The board.tsx closure resolves the dnd-kit
+// `over` id to a list id, calls planListMove, then fires `list.move`
+// with the computed neighbours and applies reorderVisibleLists as the
+// optimistic cache write.
+
+/** Compute the post-drop order + the fractional-index neighbours for a
+ *  list move. `visibleIds` is the on-screen left-to-right list order
+ *  (closed lists already filtered out by the caller); `activeId` is the
+ *  dragged list, `overId` the list it was dropped on. Returns null when
+ *  either id isn't in the list or the move is a no-op (dropped on
+ *  itself / same slot). */
+export function planListMove(
+  visibleIds: string[],
+  activeId: string,
+  overId: string
+): { orderedIds: string[]; beforeId: string | null; afterId: string | null } | null {
+  const from = visibleIds.indexOf(activeId)
+  const to = visibleIds.indexOf(overId)
+  if (from < 0 || to < 0 || from === to) return null
+  const orderedIds = arrayMove(visibleIds, from, to)
+  const pos = orderedIds.indexOf(activeId)
+  return {
+    orderedIds,
+    beforeId: orderedIds[pos - 1] ?? null,
+    afterId: orderedIds[pos + 1] ?? null
+  }
+}
+
+/** Optimistic cache projection: reorder `b.lists` so the visible lists
+ *  follow `orderedVisibleIds`. Any list not in that set (closed lists,
+ *  or one created mid-drag) keeps its relative order and sorts after the
+ *  visible block - they're filtered out of the view anyway, and the next
+ *  refetch restores the canonical position order. */
+export function reorderVisibleLists<T extends { id: string }>(
+  lists: T[],
+  orderedVisibleIds: string[]
+): T[] {
+  const rank = new Map(orderedVisibleIds.map((id, i) => [id, i]))
+  // Stable sort: visible lists by their new rank; everything else keeps
+  // its original relative order, placed after the visible block.
+  return lists
+    .map((l, i) => ({ l, i }))
+    .sort((a, b) => {
+      const ra = rank.get(a.l.id)
+      const rb = rank.get(b.l.id)
+      if (ra != null && rb != null) return ra - rb
+      if (ra != null) return -1
+      if (rb != null) return 1
+      return a.i - b.i
+    })
+    .map((x) => x.l)
+}
+
 // ─── swimlane drag-end planner ────────────────────────────────────
 // Swimlane mode is snap-on-drop (no live cache reorder in
 // onDragOver), so the drag-end handler has to decide on the spot:
