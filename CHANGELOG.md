@@ -9,6 +9,23 @@ Releases are cut by pushing a `v*` tag, which builds the Windows
 installers and publishes a GitHub Release (see
 [`.github/workflows/release.yml`](.github/workflows/release.yml)).
 
+## [0.5.1] - 2026-06-17
+
+### Changed
+
+- **Reordering a list is now a real drag.** Grab a list anywhere on its
+  header and drag the whole column (cards and all) to its new spot, the
+  same way you drag a card. The right-click "Move left / right" stays as
+  a fallback.
+
+### Fixed
+
+- **Dropping a list now lands where you aim.** Dropping right after a
+  list that has cards no longer overshoots past the list beyond it.
+- **The dragged list looks like itself.** While dragging, the floating
+  column no longer darkens its background, expands its cards to show the
+  complete-checkbox, or trails a shadow over empty space below the cards.
+
 ## [0.5.0] - 2026-06-17
 
 ### Added
