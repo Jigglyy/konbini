@@ -19,7 +19,6 @@ import {
   useSensor,
   useSensors,
   type CollisionDetection,
-  type DraggableAttributes,
   type DraggableSyntheticListeners,
   type DragEndEvent,
   type DragOverEvent,
@@ -150,6 +149,35 @@ const isListSortableId = (id: string): boolean =>
   id.startsWith(LIST_SORTABLE_PREFIX)
 const listIdFromSortable = (id: string): string =>
   id.slice(LIST_SORTABLE_PREFIX.length)
+
+// Horizontal-only collision for the list-column reorder. Columns are a
+// single non-wrapping row of wildly varying height (a list with many
+// cards vs an empty one), so the built-in detectors misbehave: both
+// closestCorners and closestCenter fold the Y axis into the distance, and
+// a tall neighbour's corner/centre can land closer to the dragged column
+// than the column the cursor is horizontally over. Resolving purely on
+// the X axis (nearest column centre to the dragged column's centre)
+// returns the slot the cursor is actually over, regardless of height.
+const closestColumnByX: CollisionDetection = ({
+  collisionRect,
+  droppableRects,
+  droppableContainers
+}) => {
+  const activeCenterX = collisionRect.left + collisionRect.width / 2
+  let closest: (typeof droppableContainers)[number] | null = null
+  let closestDist = Number.POSITIVE_INFINITY
+  for (const container of droppableContainers) {
+    const rect = droppableRects.get(container.id)
+    if (!rect) continue
+    const centerX = rect.left + rect.width / 2
+    const dist = Math.abs(centerX - activeCenterX)
+    if (dist < closestDist) {
+      closestDist = dist
+      closest = container
+    }
+  }
+  return closest ? [{ id: closest.id }] : []
+}
 
 const DROP_ANIMATION: DropAnimation = {
   duration: DROP_ANIMATION_DURATION_MS,
@@ -291,7 +319,8 @@ function CardFace({
   focused,
   selected,
   showChecklist,
-  labelsExpanded
+  labelsExpanded,
+  resting
 }: {
   card: CardView
   labels: LabelView[]
@@ -312,6 +341,14 @@ function CardFace({
   /** Mirror of the source card's label display so the overlay matches
    *  (bars vs names). No toggle here - the overlay is a frozen clone. */
   labelsExpanded?: boolean
+  /** Render like a card AT REST (not hovered): hide the completion
+   *  checkbox unless the card is actually completed, and don't reserve
+   *  the checkbox column for the checklist shift. The single-card drag
+   *  overlay leaves this off (the grabbed card was hovered, so its
+   *  checkbox was showing - keep it for continuity); the list-reorder
+   *  clone sets it so the cards inside look exactly like the resting
+   *  column, not the hover-expanded state. */
+  resting?: boolean
 }) {
   // Replicates `ring-2 ring-ring ring-offset-1 ring-offset-background`
   // as a two-shadow stack: a 1px solid in the background colour right
@@ -367,15 +404,20 @@ function CardFace({
         expanded={labelsExpanded}
       />
       <div className="flex items-start gap-2">
-        <span
-          className={`mt-0.5 flex size-4 shrink-0 items-center justify-center rounded border ${
-            card.completed
-              ? 'border-primary bg-primary text-primary-foreground'
-              : 'border-border'
-          }`}
-        >
-          {card.completed && <Check className="size-3" />}
-        </span>
+        {/* Resting clone hides the checkbox for an incomplete card (it's
+            w-0 / hidden until hover on the real card); a completed card
+            keeps it visible at rest, so show it then. */}
+        {(!resting || card.completed) && (
+          <span
+            className={`mt-0.5 flex size-4 shrink-0 items-center justify-center rounded border ${
+              card.completed
+                ? 'border-primary bg-primary text-primary-foreground'
+                : 'border-border'
+            }`}
+          >
+            {card.completed && <Check className="size-3" />}
+          </span>
+        )}
         {/* `pr-5` mirrors the in-list SortableCard title's reserved
             space for the absolute pencil button. `min-w-0` +
             `wrap-anywhere` let unbreakable strings wrap so a long
@@ -401,8 +443,10 @@ function CardFace({
         // visible card was shorter than the source the user just
         // grabbed → "card shrinks from the bottom on drag start."
         // Completed cards use ml-1 (matches SortableCard's completed
-        // branch); everyone else gets ml-4.
-        <div className={card.completed ? 'ml-1' : 'ml-4'}>
+        // branch); everyone else gets ml-4. A resting clone has no
+        // checkbox column to clear, so it uses ml-0 (the real card's
+        // non-hovered margin) instead.
+        <div className={card.completed ? 'ml-1' : resting ? 'ml-0' : 'ml-4'}>
           <CardChecklistPreview card={card} />
         </div>
       )}
@@ -762,8 +806,15 @@ export function Board({
   // `list:` / `lane:` droppables (never a `listcol:` column-reorder
   // target), and a list drag only resolves `listcol:` targets. Filtering
   // the candidate set keeps the card path byte-identical to before (those
-  // `listcol:` droppables simply didn't exist) while giving list drags a
-  // clean column-only field.
+  // `listcol:` droppables simply didn't exist).
+  //
+  // Cards keep closestCorners. Lists use an X-only resolver instead: the
+  // columns vary wildly in height (a list with cards vs an empty one), and
+  // closestCorners/closestCenter both fold the Y axis in, so a tall
+  // neighbour's corner could read as "closer" than the column the cursor
+  // is actually over - dropping after a list with cards then overshot past
+  // the next list. Nearest-column-centre-on-X makes the slot match what
+  // the cursor is horizontally over, regardless of height.
   const collisionDetection = useCallback<CollisionDetection>((args) => {
     const activeIsList = isListSortableId(String(args.active.id))
     const droppableContainers = args.droppableContainers.filter((c) =>
@@ -771,7 +822,8 @@ export function Board({
         ? isListSortableId(String(c.id))
         : !isListSortableId(String(c.id))
     )
-    return closestCorners({ ...args, droppableContainers })
+    const scoped = { ...args, droppableContainers }
+    return activeIsList ? closestColumnByX(scoped) : closestCorners(scoped)
   }, [])
 
   // --- Multi-select click + bulk actions ---------------------------------
@@ -1811,18 +1863,16 @@ export function ListHeader({
   list,
   apply,
   dragListeners,
-  dragAttributes,
   onMove,
   canMoveLeft,
   canMoveRight
 }: {
   list: BoardView['lists'][number]
   apply: (m: Mutation, o: Optimistic) => void
-  /** dnd-kit handle props for the reorder grip. When omitted (e.g. the
-   *  swimlane header row) no grip renders and the column isn't
-   *  drag-reorderable from here. */
+  /** dnd-kit pointer listeners for the whole-header drag handle. When
+   *  omitted (e.g. the swimlane header row) the header isn't draggable.
+   *  Listeners only - NOT `attributes` (see the <h2> for why). */
   dragListeners?: DraggableSyntheticListeners
-  dragAttributes?: DraggableAttributes
   /** Menu fallback for reorder (no-pointer / keyboard path). */
   onMove?: (dir: -1 | 1) => void
   canMoveLeft?: boolean
@@ -1848,29 +1898,42 @@ export function ListHeader({
       )}
     >
       {(open) => (
+        // The WHOLE header is the drag handle (like a card's whole <li>),
+        // so a list reorders by grabbing it anywhere - not just a tiny
+        // grip. The 6 px PointerSensor distance keeps a plain click
+        // (pencil / nothing) from starting a drag, and interactive
+        // children stop pointerdown propagation so they never start one
+        // either. Cards inside the column have their own listeners on
+        // their own <li>, so grabbing a card drags the card, not the
+        // list. The grip icon is now just a visual "you can drag this"
+        // cue.
+        //
+        // Only the drag LISTENERS go here, NOT dnd-kit's `attributes`:
+        // those set role="button", which would clobber the <h2>'s heading
+        // role (breaks a11y + the getByRole('heading') the e2e specs use
+        // to find list headers). Pointer dragging only needs the
+        // listeners; the keyboard reorder path is the menu's Move
+        // left/right (there's no KeyboardSensor registered anyway).
         <h2
+          {...dragListeners}
           onContextMenu={open}
+          title={dragListeners ? 'Drag to reorder list' : undefined}
           style={
             list.color
               ? { backgroundColor: tint(list.color, 45, 'var(--color-background)') }
               : undefined
           }
-          className="flex items-center gap-2 px-3 py-2 text-sm font-medium"
+          className={`flex items-center gap-2 px-3 py-2 text-sm font-medium ${
+            dragListeners
+              ? 'cursor-grab touch-none active:cursor-grabbing'
+              : ''
+          }`}
         >
           {dragListeners && (
-            // Reorder grip. The whole-column sortable activates from here
-            // (the listeners live on this button, not the section) so a
-            // drag never starts from a card or the header text. The 6 px
-            // PointerSensor distance still lets a plain click through.
-            <button
-              {...dragAttributes}
-              {...dragListeners}
-              aria-label={`Reorder list "${list.name}"`}
-              title="Drag to reorder list"
-              className="-ml-1 shrink-0 cursor-grab touch-none rounded text-muted-foreground/60 hover:text-foreground active:cursor-grabbing"
-            >
-              <GripVertical className="size-4" />
-            </button>
+            <GripVertical
+              aria-hidden
+              className="-ml-1 size-4 shrink-0 text-muted-foreground/50"
+            />
           )}
           <span className="flex-1 truncate">{list.name}</span>
           {list.sortMode && (
@@ -1895,6 +1958,7 @@ export function ListHeader({
           <button
             aria-label="Edit list"
             onClick={open}
+            onPointerDown={(e) => e.stopPropagation()}
             className="text-muted-foreground hover:text-foreground"
           >
             <Pencil className="size-3.5" />
@@ -1979,17 +2043,17 @@ const ListColumn = memo(function ListColumn({
   const { setNodeRef: setDroppableRef, isOver } = useDroppable({
     id: `list:${list.id}`
   })
-  // The whole column is a horizontal sortable. The grip
-  // in the header is the activator (listeners spread there); the section
-  // gets the sort transform so siblings glide as it's dragged. isDragging
-  // hides the source while the DragOverlay shows the column preview.
+  // The whole column is a horizontal sortable. The header is the drag
+  // activator (listeners spread on the <h2>, not the section, so a card
+  // drag and a header drag never start from the same element); the
+  // section gets the sort transform so siblings glide as it's dragged.
+  // isDragging hides the source while the DragOverlay shows the preview.
   const {
     setNodeRef: setSortableRef,
     transform,
     transition,
     isDragging: isListDragging,
-    listeners: dragListeners,
-    attributes: dragAttributes
+    listeners: dragListeners
   } = useSortable({
     id: `${LIST_SORTABLE_PREFIX}${list.id}`,
     animateLayoutChanges: ({ isSorting }) => isSorting,
@@ -2052,7 +2116,6 @@ const ListColumn = memo(function ListColumn({
         list={list}
         apply={apply}
         dragListeners={dragListeners}
-        dragAttributes={dragAttributes}
         onMove={onMoveList ? (dir) => onMoveList(list.id, dir) : undefined}
         canMoveLeft={canMoveLeft}
         canMoveRight={canMoveRight}
@@ -2127,7 +2190,13 @@ const ListColumn = memo(function ListColumn({
  *  must not register drag nodes) and no interactive chrome - just the
  *  header strip + the cards as static CardFaces so the floating column
  *  reads like the real one. dnd-kit sizes the overlay to the source
- *  column's rect, so this matches it. */
+ *  column's rect, so this matches it.
+ *
+ *  `aria-hidden`: the real column is still in the tree during the drag,
+ *  so this clone is a visual duplicate - hide it from the accessibility
+ *  tree so screen readers don't announce two of every list/card, and so
+ *  role queries (and the e2e getByRole('heading')) see only the real
+ *  header. */
 function ListColumnPreview({
   list,
   labels,
@@ -2141,8 +2210,12 @@ function ListColumnPreview({
 }) {
   return (
     <section
+      aria-hidden
       style={list.color ? { borderColor: list.color } : undefined}
-      className={`flex w-72 shrink-0 flex-col overflow-hidden rounded-lg border bg-muted pb-1 ${
+      // bg-muted/60 matches the resting column (the real section is
+      // bg-muted/60 unless a card is being dragged over it); the clone
+      // used opaque bg-muted, which read as the list darkening on grab.
+      className={`flex w-72 shrink-0 flex-col overflow-hidden rounded-lg border bg-muted/60 pb-1 ${
         list.color ? '' : 'border-border'
       }`}
     >
@@ -2158,7 +2231,7 @@ function ListColumnPreview({
         <span className="flex-1 truncate">{list.name}</span>
         <span className="text-xs text-muted-foreground">{list.cards.length}</span>
       </h2>
-      <ul className="flex flex-col gap-2 px-2 pt-2">
+      <ul className="flex min-h-2 flex-col gap-2 px-2 pt-2">
         {list.cards.map((card) => (
           <li key={card.id}>
             <CardFace
@@ -2166,10 +2239,20 @@ function ListColumnPreview({
               labels={labels}
               showChecklist={showChecklist}
               labelsExpanded={labelsExpanded}
+              resting
             />
           </li>
         ))}
       </ul>
+      {/* Static stand-in for the AddCard input. dnd-kit sizes the overlay
+          to the SOURCE column's rect, which includes the "+ Add a card"
+          row; without a matching element here the clone was shorter than
+          its container and the lift shadow wrapped the empty gap below
+          the cards. Mirrors AddCard's box metrics (m-2 + px-3 py-2 +
+          text-sm) so the preview height matches the real column. */}
+      <div className="m-2 rounded-md border border-transparent px-3 py-2 text-sm text-muted-foreground">
+        + Add a card
+      </div>
     </section>
   )
 }
