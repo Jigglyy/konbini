@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
   type CSSProperties
@@ -23,7 +24,8 @@ import {
   type DragEndEvent,
   type DragOverEvent,
   type DragStartEvent,
-  type DropAnimation
+  type DropAnimation,
+  type Modifier
 } from '@dnd-kit/core'
 import {
   SortableContext,
@@ -108,8 +110,11 @@ import {
   reorderVisibleLists
 } from '../lib/board-dnd'
 import {
+  CROSS_LIST_DWELL_MS,
   DROP_ANIMATION_DURATION_MS,
-  POST_DROP_HOLD_MS
+  PICKUP_CATCHUP_MS,
+  POST_DROP_HOLD_MS,
+  createSmoothPickup
 } from '../lib/drag-polish'
 
 // Buttery drop in 200 ms. Two-keyframe LIFT → REST with a strong
@@ -617,6 +622,91 @@ export function Board({
   const sensors = useSensors(
     // Distance constraint so clicking the card buttons still works.
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } })
+  )
+
+  // Smooth pickup (cards AND lists share this one DragOverlay). The 6px
+  // activation distance means the pointer has already moved by the time the
+  // drag exists; without this the overlay appears at source+delta and the
+  // item snaps to the cursor. The modifier scales the live transform by a
+  // TIME-based ease so the overlay lifts off at the source and glides to the
+  // cursor (no snap; the lag rides the current drag direction so it can't
+  // bounce). DragOverlay modifiers are visual-only - collision uses the
+  // unmodified transform (drops stay accurate) and the drop animation reads
+  // the overlay's live computed transform (release glides cleanly).
+  //
+  // The ease is time-based, so the modifier must keep re-applying while the
+  // pointer is HELD (otherwise it freezes mid-glide). dnd-kit only re-renders
+  // the overlay on pointermove, so we drive our own requestAnimationFrame
+  // tick for the catch-up window that forces the overlay to re-render (and
+  // re-run the modifier) each frame. The tick only changes a counter - it
+  // never touches SortableContext.items, so no FLIP churn / StrictMode loop.
+  const pickup = useMemo(() => createSmoothPickup(), [])
+  const overlayModifiers = useMemo<Modifier[]>(
+    () => [pickup.modifier as Modifier],
+    [pickup]
+  )
+  const [, forcePickupTick] = useReducer((n: number) => n + 1, 0)
+  const pickupRaf = useRef<number | null>(null)
+  const stopPickupAnim = useCallback((): void => {
+    if (pickupRaf.current !== null) {
+      cancelAnimationFrame(pickupRaf.current)
+      pickupRaf.current = null
+    }
+  }, [])
+  const startPickupAnim = useCallback((): void => {
+    stopPickupAnim()
+    const t0 = performance.now()
+    const step = (): void => {
+      forcePickupTick()
+      // Run a couple of frames past the ease so the final progress=1 frame
+      // paints; the modifier clamps progress, so over-running is harmless.
+      if (performance.now() - t0 < PICKUP_CATCHUP_MS + 48) {
+        pickupRaf.current = requestAnimationFrame(step)
+      } else {
+        pickupRaf.current = null
+      }
+    }
+    pickupRaf.current = requestAnimationFrame(step)
+  }, [stopPickupAnim])
+  useEffect(() => stopPickupAnim, [stopPickupAnim])
+
+  // Cross-list DWELL gate. The live reorder used to splice the dragged card
+  // into whatever list the cursor was over EVERY frame, so sweeping across the
+  // board made every passed-over list bounce (laggy + jarring). Instead we
+  // hold the would-be cross-list move in `pendingCrossRef` and only commit it
+  // once the cursor has lingered over that list for CROSS_LIST_DWELL_MS - a
+  // fast sweep never dwells long enough, so passed-over lists stay untouched.
+  // The timer fires the commit even if the cursor then stops (no more
+  // onDragOver events); a drop that beats it is placed directly in onDragEnd.
+  const pendingCrossRef = useRef<{
+    activeId: string
+    overId: string
+    toListId: string
+    position: 'before' | 'after'
+  } | null>(null)
+  const dwellTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  function clearCrossDwell(): void {
+    if (dwellTimerRef.current !== null) {
+      clearTimeout(dwellTimerRef.current)
+      dwellTimerRef.current = null
+    }
+    pendingCrossRef.current = null
+  }
+  function commitCrossDwell(): void {
+    const p = pendingCrossRef.current
+    dwellTimerRef.current = null
+    pendingCrossRef.current = null
+    if (!p) return
+    qc.setQueryData<BoardView | null>(key, (prev) =>
+      prev ? reduceCardMove(prev, p.activeId, p.overId, p.position) : prev
+    )
+  }
+  // Clear a lingering dwell timer if the board unmounts mid-drag.
+  useEffect(
+    () => () => {
+      if (dwellTimerRef.current !== null) clearTimeout(dwellTimerRef.current)
+    },
+    []
   )
 
   const findCard = (id: string): CardView | undefined =>
@@ -1233,6 +1323,11 @@ export function Board({
 
   function onDragStart(e: DragStartEvent): void {
     const activeId = String(e.active.id)
+    // Re-arm the smooth-pickup ease (cards + lists) and drive its rAF tick
+    // for the catch-up window so the overlay glides off the source.
+    pickup.reset()
+    startPickupAnim()
+    clearCrossDwell() // no stale pending cross-list commit from a prior drag
     // List-column drag: record which list is moving (drives the overlay
     // preview) and bail before any of the card-specific setup.
     if (isListSortableId(activeId)) {
@@ -1273,6 +1368,7 @@ export function Board({
     if (isListSortableId(String(active.id))) return
     if (!over) {
       setBlockedListId(null)
+      clearCrossDwell()
       return
     }
     const activeId = String(active.id)
@@ -1297,12 +1393,15 @@ export function Board({
         const blocked = findWipBlock(cur, activeId, overId)
         if (blocked) {
           setBlockedListId(blocked)
+          clearCrossDwell()
           return
         }
       }
     }
     setBlockedListId(null)
 
+    const cur = qc.getQueryData<BoardView | null>(key)
+    if (!cur) return
     // ADR-0032: only block *within-list* reorders on sorted lists -
     // a card's position there is decided by created_at, so dragging
     // it next to a sibling would visually re-snap on the next read.
@@ -1310,44 +1409,60 @@ export function Board({
     // lands with whatever optimistic slot we pick here and the
     // server-side ORDER BY puts it in its created_at position on
     // refetch (~10–50 ms - a brief settle, no permanent oddness).
-    {
-      const cur = qc.getQueryData<BoardView | null>(key)
-      if (cur && isSortedListReorder(cur, activeId, overId)) return
+    if (isSortedListReorder(cur, activeId, overId)) return
 
-      // SAME-LIST reorder: do NOT mutate the cache here. dnd-kit's
-      // verticalListSortingStrategy already glides the siblings via pure
-      // CSS transforms (cheap, GPU-composited). Live-reordering the array
-      // on top of that re-renders EVERY card in the list on every
-      // onDragOver frame AND triggers dnd-kit's internal
-      // `useDerivedTransform` FLIP - which is the per-frame getClientRect
-      // reflow storm behind the drag jank, and the StrictMode-dev
-      // "Maximum update depth exceeded" crash (the FLIP's layout effect
-      // sets state keyed on the item's index, which the live reorder
-      // churns every frame). Skipping the reorder leaves `index` stable
-      // so the FLIP never fires; the final order is applied once on drop
-      // (onDragEnd). Cross-list moves still splice live below - a card
-      // has to actually enter the other list's SortableContext to render
-      // there at all.
-      if (cur) {
-        const fromId = listOf(cur, activeId)
-        const toId = listOf(cur, overId)
-        if (fromId && toId && fromId === toId) return
-      }
+    const fromId = listOf(cur, activeId)
+    const toId = listOf(cur, overId)
+
+    // SAME-LIST reorder: do NOT mutate the cache here. dnd-kit's
+    // verticalListSortingStrategy already glides the siblings via pure
+    // CSS transforms (cheap, GPU-composited). Live-reordering the array
+    // on top of that re-renders EVERY card in the list on every
+    // onDragOver frame AND triggers dnd-kit's internal
+    // `useDerivedTransform` FLIP - which is the per-frame getClientRect
+    // reflow storm behind the drag jank, and the StrictMode-dev
+    // "Maximum update depth exceeded" crash (the FLIP's layout effect
+    // sets state keyed on the item's index, which the live reorder
+    // churns every frame). Skipping the reorder leaves `index` stable
+    // so the FLIP never fires; the final order is applied once on drop
+    // (onDragEnd). Also stand down any pending cross-list commit - we're
+    // back over the card's own list.
+    if (fromId && toId && fromId === toId) {
+      clearCrossDwell()
+      return
     }
+    if (!toId) return
 
-    // Cross-list: resolve drop direction from the rect math here, then
-    // hand off to the pure reducer in lib/board-dnd. The rect comparison
-    // is dnd-kit-state and can't live in a pure function.
+    // CROSS-LIST: resolve the drop slot from rect math, then DWELL before
+    // committing. We do NOT splice the card into this list yet - only once the
+    // cursor has lingered here for CROSS_LIST_DWELL_MS. A fast sweep crosses a
+    // list in less than that, so it never commits (no bounce, no re-render
+    // churn, no opaque flash). The timer fires the commit even if the cursor
+    // then stops; a drop that beats it is placed directly in onDragEnd.
     const aRect = active.rect.current.translated
     const oRect = over.rect
     const below = !!aRect && aRect.top > oRect.top + oRect.height / 2
     const position: 'before' | 'after' = below ? 'after' : 'before'
-    qc.setQueryData<BoardView | null>(key, (prev) =>
-      prev ? reduceCardMove(prev, activeId, overId, position) : prev
-    )
+    const pending = pendingCrossRef.current
+    if (!pending || pending.toListId !== toId) {
+      // Newly over this list: arm the dwell timer from first entry.
+      pendingCrossRef.current = { activeId, overId, toListId: toId, position }
+      if (dwellTimerRef.current !== null) clearTimeout(dwellTimerRef.current)
+      dwellTimerRef.current = setTimeout(commitCrossDwell, CROSS_LIST_DWELL_MS)
+    } else {
+      // Still over the same list, moving within it: refine the drop slot but
+      // let the timer keep counting from when we first entered.
+      pending.overId = overId
+      pending.position = position
+    }
   }
 
   function onDragEnd(e: DragEndEvent): void {
+    // Stop the pickup catch-up tick - the drop animation owns the release.
+    stopPickupAnim()
+    // Cancel any pending cross-list dwell - the drop below decides placement
+    // directly; a timer firing after the drop would corrupt the cache.
+    clearCrossDwell()
     // List-column drag has its own persist path (no card snapshot /
     // multi-select / hover bookkeeping applies).
     if (isListSortableId(String(e.active.id))) {
@@ -1392,25 +1507,22 @@ export function Board({
     }
     let b = qc.getQueryData<BoardView | null>(key)
     if (!b) return
-    // SAME-LIST drops weren't live-reordered in onDragOver (the strategy
-    // animated the siblings instead - see the comment there). Apply the
-    // reorder ONCE now so the dropped card lands where it visually sat +
-    // the persist target is computed from the final order. Cross-list
-    // moves already reordered the cache during onDragOver, so `b` is
-    // correct for them. Sorted lists keep their no-op behaviour
-    // (isSortedListReorder), and so do drops back onto the source slot
-    // (reduceCardMove returns `prev` unchanged). Multi-drag + single
-    // move below both read this reordered `b`.
+    // Place the dropped card at its final slot. With the cross-list DWELL,
+    // onDragOver may NOT have committed the move (a fast drop can beat the
+    // dwell timer), so onDragEnd is self-sufficient: it reduces from `over`
+    // for CROSS-list drops too, not just same-list. dnd-kit's sorting strategy
+    // animated same-list siblings during the drag, so applying the reorder
+    // once here lands the card where it visually sat. A WIP-full target is
+    // refused here (so the limit holds on a fast drop, not only on hover) by
+    // skipping the placement - the card then resolves to wherever it currently
+    // sits (its source if uncommitted) and the unchanged-move check reverts
+    // it. Sorted-list same-list reorders stay a no-op (isSortedListReorder),
+    // and a drop back on the source slot is a no-op (reduceCardMove returns
+    // `prev`). Multi-drag + single move below both read this reordered `b`.
     {
       const overId = String(e.over.id)
-      const fromId = listOf(b, activeId)
-      const toId = listOf(b, overId)
-      if (
-        fromId &&
-        toId &&
-        fromId === toId &&
-        !isSortedListReorder(b, activeId, overId)
-      ) {
+      const wipBlocked = blockDrag && !!findWipBlock(b, activeId, overId)
+      if (!wipBlocked && !isSortedListReorder(b, activeId, overId)) {
         const aRect = e.active.rect.current.translated
         const oRect = e.over.rect
         const below = !!aRect && aRect.top > oRect.top + oRect.height / 2
@@ -1578,6 +1690,8 @@ export function Board({
   }
 
   function onDragCancel(): void {
+    stopPickupAnim()
+    clearCrossDwell()
     // A cancelled list drag just clears the overlay state - no cache was
     // touched during the drag.
     if (draggingListId) {
@@ -1738,6 +1852,10 @@ export function Board({
 
       <DragOverlay
         dropAnimation={DROP_ANIMATION}
+        // Smooth pickup: eases the overlay from the source to the cursor so
+        // it doesn't snap on grab (see the `pickup` comment above). Visual
+        // only - collision + drop animation are unaffected.
+        modifiers={overlayModifiers}
         // LIFT_SHADOW lives HERE on the overlay wrapper (not on
         // CardFace's inline style) so DROP_ANIMATION's keyframes -
         // which `.animate()` runs against this wrapper element -
@@ -2062,15 +2180,24 @@ const ListColumn = memo(function ListColumn({
       easing: 'cubic-bezier(0.22, 1, 0.36, 1)'
     }
   })
-  // Tee both dnd-kit refs (card-drop droppable + list sortable) onto the
-  // one <section> node.
+  // Tee the dnd-kit refs (card-drop droppable + list sortable) AND our own
+  // height-tween ref onto the one <section> node.
+  const sectionElRef = useRef<HTMLElement | null>(null)
   const setSectionRef = useCallback(
     (node: HTMLElement | null): void => {
       setDroppableRef(node)
       setSortableRef(node)
+      sectionElRef.current = node
     },
     [setDroppableRef, setSortableRef]
   )
+  // Grow/shrink the column smoothly when a card enters/leaves it during a drag
+  // (the height change snaps a card's worth of height in one frame otherwise).
+  // This stays cheap + churn-free because the cross-list DWELL (see onDragOver)
+  // means a card only ever enters the list it SETTLES in, not every list it
+  // sweeps past - so this fires at most once per settle, never per frame.
+  // Enabled only during a drag; outside one, card add/delete stays instant.
+  useSmoothHeight(sectionElRef, anyDragging)
   // At/over the card limit: the badge tints, and (when the setting is
   // on) the add-card box is blocked.
   const atLimit =
@@ -2106,10 +2233,14 @@ const ListColumn = memo(function ListColumn({
         transform: CSS.Transform.toString(transform),
         transition
       }}
-      className={`flex w-72 shrink-0 flex-col overflow-hidden rounded-lg border pb-1 transition-colors ${
+      className={`flex w-72 shrink-0 flex-col overflow-hidden rounded-lg border bg-muted/60 pb-1 transition-colors ${
         list.color ? '' : 'border-border'
-      } ${isOver ? 'bg-muted' : 'bg-muted/60'} ${
-        blocked ? 'ring-2 ring-red-400/70' : ''
+      } ${
+        blocked
+          ? 'ring-2 ring-red-400/70'
+          : isOver
+            ? 'ring-2 ring-primary/70'
+            : ''
       } ${isListDragging ? 'opacity-0' : ''} ${shakeClass}`}
     >
       <ListHeader
@@ -2309,18 +2440,26 @@ const SortableCard = memo(function SortableCard({
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({
       id: card.id,
-      // FLIP-animate layout changes ONLY while a drag is in progress.
-      // With the live cache-reorder pattern (onDragOver mutates the
-      // cache), displaced siblings move because `SortableContext.items`
-      // changes - and dnd-kit's internal `useDerivedTransform` FLIP is
-      // what glides them. That FLIP is gated by `animateLayoutChanges`,
-      // so it must be ON during the drag or siblings snap instead of
-      // sliding. It must be OFF once the drag ends: otherwise the
-      // just-dropped card FLIP-slides from its old slot to its new one
-      // on top of the DragOverlay's drop animation (the M-review snap
-      // bug). `isSorting` is the exact discriminator - true for the
-      // whole drag, false the instant the drop completes.
-      animateLayoutChanges: ({ isSorting }) => isSorting,
+      // Gate dnd-kit's post-drop transition (getTransition in the sortable
+      // source applies the glide CSS only when this is true, or while
+      // sorting). During the drag we want it ON so displaced siblings glide.
+      // After the drag it must be OFF for a REAL move - otherwise the
+      // just-dropped card FLIP-slides from its old slot to its new one on top
+      // of the DragOverlay's drop animation (the M-review snap bug).
+      //
+      // BUT there's an exception that fixes the first-card "put-back" snap:
+      // same-list reorder is strategy-only (onDragOver never mutates the
+      // cache), so `items` is referentially UNCHANGED for the whole drag, and
+      // a no-op put-back leaves it unchanged on drop too -> `previousItems ===
+      // items`. A REAL move (same- or cross-list) changes the cache in
+      // onDragEnd -> `previousItems !== items`. So `previousItems === items`
+      // is true ONLY for the no-op case, where there's no DOM reorder and thus
+      // no slide to cause - and keeping the transition ON there lets the
+      // strategy-displaced sibling glide its transform back to 0 instead of
+      // teleporting (the snap). Real moves fall through to `isSorting` (false
+      // post-drop) exactly as before, so the slide stays fixed.
+      animateLayoutChanges: ({ isSorting, previousItems, items }) =>
+        isSorting || previousItems === items,
       // Match the drop animation's duration + easing so sibling shifts
       // and the released card feel like one consistent motion. Pulling
       // from the shared constant keeps them in lockstep automatically
