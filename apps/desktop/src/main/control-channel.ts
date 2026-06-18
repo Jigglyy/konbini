@@ -10,6 +10,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto'
 import {
   type Db,
   applyMutationRecorded,
+  applyMutationsRecorded,
   getBoardView,
   getCardView,
   listBoards,
@@ -22,28 +23,48 @@ import {
   zGetBoardViewRequest,
   zGetCardViewRequest,
   zMutation,
+  zMutationBatch,
   zMutationResult,
+  zMutationResults,
   zSearchCardsRequest,
   zSearchHits
 } from '@kanbini/shared'
 
 // MCP control channel (M3-A read, M3-tail writes). A minimal HTTP/JSON
-// RPC bound to 127.0.0.1 that the @kanbini/mcp stdio server uses to
+// API bound to 127.0.0.1 that the @kanbini/mcp stdio server uses to
 // read and mutate board state from the running app. Same-process
 // dispatch - no IPC, no extra DB connection - so AI edits are live
 // and the renderer's `changed` subscription picks them up immediately.
+//
+// Two equivalent front doors over ONE dispatch table (`methods`):
+//   1. JSON-RPC: `POST /rpc` with `{ method, params }` - what the
+//      bundled MCP server speaks. Stable; don't break it.
+//   2. REST aliases (for non-MCP consumers - scripts, automation, the
+//      planned mobile companion): ergonomic routes that map onto the
+//      same methods, so there's one implementation + one test surface:
+//        GET  /boards            -> boards.list
+//        GET  /boards/:id        -> board.getView
+//        GET  /cards/:id         -> card.get
+//        GET  /search?query=&limit= -> search.cards
+//        POST /mutate            -> mutate      (body = a zMutation)
+//        POST /mutate/batch      -> mutate.batch (body = zMutation[] or
+//                                   { mutations: [...] })
+// Both require the same bearer token; documented in docs/MCP.md.
 //
 // Security model:
 // - Bound to 127.0.0.1 only (no LAN exposure).
 // - Bearer token from `userData/mcp-token` (32 random bytes hex,
 //   persisted across restarts, 0o600 on POSIX). MCP server reads it
-//   too; mismatched tokens get a 401 with constant-time compare.
+//   too; mismatched tokens get a 401 with constant-time compare. Auth
+//   gates EVERY route (we check it before routing so route existence
+//   isn't leaked to an unauthenticated caller).
 // - { port, token, pid } also written to `userData/mcp.json` so the
 //   MCP server can discover the running app's port (ephemeral port,
 //   server.listen(0)).
 // - Method allow-list - adding a method is a one-liner. The single
 //   `mutate` method accepts the full zMutation discriminated union,
-//   same shape as the renderer's IPC.mutate channel.
+//   same shape as the renderer's IPC.mutate channel; `mutate.batch`
+//   mirrors IPC.mutateBatch (one transaction, one undo group).
 //
 // Known limitation: `attachment.delete` issued via MCP removes the DB
 // row but does NOT unlink the file on disk (the renderer IPC handler
@@ -102,6 +123,26 @@ const methods: Record<string, Method> = {
     const result = zMutationResult.parse(applyMutationRecorded(db, mutation))
     ctx.onChange(result.boardId)
     return result
+  },
+  'mutate.batch': (db, raw, ctx) => {
+    // Mirrors the renderer's IPC.mutateBatch: several mutations in ONE
+    // transaction, recorded under a single undo-log group so one Ctrl+Z
+    // unwinds the whole gesture. The efficiency win over N separate
+    // `mutate` calls for bulk script/AI work (one round trip, one tx).
+    const mutations = zMutationBatch.parse(raw)
+    for (const m of mutations) {
+      // `restore` is never allowed on the channel (undo owns it); a
+      // file-backed `attachment.delete` needs the per-mutation unlink the
+      // renderer IPC does, so it can't ride a batch.
+      if (m.type === 'restore' || m.type === 'attachment.delete') {
+        throw new Error(`${m.type} not allowed in a mutation batch`)
+      }
+    }
+    const results = zMutationResults.parse(applyMutationsRecorded(db, mutations))
+    for (const boardId of new Set(results.map((r) => r.boardId))) {
+      ctx.onChange(boardId)
+    }
+    return results
   }
 }
 
@@ -225,34 +266,17 @@ export async function startControlChannel(
   server.keepAliveTimeout = 60_000
   server.headersTimeout = 65_000
 
-  async function handle(
-    req: IncomingMessage,
-    res: ServerResponse
-  ): Promise<void> {
-    if (req.method !== 'POST' || req.url !== '/rpc') {
-      send(res, 404, { error: 'not found' })
-      return
-    }
-    if (!checkToken(req, token)) {
-      send(res, 401, { error: 'unauthorized' })
-      return
-    }
-    let body: { method?: unknown; params?: unknown } | null
-    try {
-      body = (await readJson(req)) as typeof body
-    } catch (e) {
-      send(res, 400, { error: (e as Error).message })
-      return
-    }
-    const method = String(body?.method ?? '')
-    const handler = methods[method]
+  /** Run an allow-listed method and write its HTTP response. Shared by
+   *  the JSON-RPC `/rpc` route and every REST alias so there's exactly
+   *  one dispatch + error-mapping path. */
+  function runMethod(name: string, params: unknown, res: ServerResponse): void {
+    const handler = methods[name]
     if (!handler) {
-      send(res, 400, { error: `unknown method: ${method}` })
+      send(res, 400, { error: `unknown method: ${name}` })
       return
     }
     try {
-      const result = handler(db, body?.params, { onChange })
-      send(res, 200, result)
+      send(res, 200, handler(db, params, { onChange }))
     } catch (e) {
       // Duck-type ZodError (no `zod` dep at this workspace; instanceof
       // would need it). The shape - name + issues array - is stable
@@ -264,6 +288,89 @@ export async function startControlChannel(
         send(res, 500, { error: msg })
       }
     }
+  }
+
+  async function handle(
+    req: IncomingMessage,
+    res: ServerResponse
+  ): Promise<void> {
+    // Auth gates every route - checked before routing so an
+    // unauthenticated caller can't even probe which paths exist.
+    if (!checkToken(req, token)) {
+      send(res, 401, { error: 'unauthorized' })
+      return
+    }
+    const httpMethod = req.method ?? 'GET'
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1')
+    const path = url.pathname
+
+    // REST read aliases (GET): params come from the path / query string.
+    if (httpMethod === 'GET') {
+      if (path === '/boards') {
+        runMethod('boards.list', {}, res)
+        return
+      }
+      const boardMatch = /^\/boards\/([^/]+)$/.exec(path)
+      if (boardMatch) {
+        runMethod(
+          'board.getView',
+          { boardId: decodeURIComponent(boardMatch[1]!) },
+          res
+        )
+        return
+      }
+      const cardMatch = /^\/cards\/([^/]+)$/.exec(path)
+      if (cardMatch) {
+        runMethod('card.get', { id: decodeURIComponent(cardMatch[1]!) }, res)
+        return
+      }
+      if (path === '/search') {
+        const query =
+          url.searchParams.get('query') ?? url.searchParams.get('q') ?? ''
+        const limitRaw = url.searchParams.get('limit')
+        runMethod(
+          'search.cards',
+          { query, ...(limitRaw != null ? { limit: Number(limitRaw) } : {}) },
+          res
+        )
+        return
+      }
+      send(res, 404, { error: 'not found' })
+      return
+    }
+
+    // Everything else carries a JSON body (RPC envelope or a mutation).
+    if (httpMethod === 'POST') {
+      let body: unknown
+      try {
+        body = await readJson(req)
+      } catch (e) {
+        send(res, 400, { error: (e as Error).message })
+        return
+      }
+      // JSON-RPC envelope - what the bundled MCP server speaks.
+      if (path === '/rpc') {
+        const env = body as { method?: unknown; params?: unknown } | null
+        runMethod(String(env?.method ?? ''), env?.params, res)
+        return
+      }
+      // REST write aliases - the body IS the mutation / mutation array.
+      if (path === '/mutate') {
+        runMethod('mutate', body, res)
+        return
+      }
+      if (path === '/mutate/batch') {
+        const mutations = Array.isArray(body)
+          ? body
+          : (body as { mutations?: unknown } | null)?.mutations
+        runMethod('mutate.batch', mutations, res)
+        return
+      }
+      send(res, 404, { error: 'not found' })
+      return
+    }
+
+    send(res, 404, { error: 'not found' })
   }
 
   await new Promise<void>((resolve, reject) => {

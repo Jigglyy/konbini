@@ -312,6 +312,80 @@ Mark a checklist item complete (`true`) or reopen it (`false`).
 
 ---
 
+## Direct HTTP API (without MCP)
+
+The same 127.0.0.1 control channel the MCP server speaks to is also a
+documented local HTTP API, for consumers that don't talk MCP: your own
+scripts, automation, a future mobile companion, etc. It's the *same*
+dispatch table behind the MCP tools - no second server, no second
+implementation.
+
+Same rules as the MCP hop apply:
+
+- **Loopback only** (`127.0.0.1`) and **bearer-token authenticated** on
+  every request. Read `port` + `token` from `<userData>/mcp.json` (see
+  Troubleshooting for where userData lives).
+- **App must be running.** Unlike the MCP read tools (which fall back to
+  the on-disk export when the app is closed, see Architecture), the HTTP
+  API needs the live DB - reads and writes both require the app open.
+- Writes land on the **same global undo stack** as everything else, so a
+  user can Ctrl+Z an API-driven change.
+
+### Endpoints
+
+| Method + path            | Maps to        | Body / query                          |
+|--------------------------|----------------|---------------------------------------|
+| `GET  /boards`           | `boards.list`  | -                                     |
+| `GET  /boards/:id`       | `board.getView`| -                                     |
+| `GET  /cards/:id`        | `card.get`     | -                                     |
+| `GET  /search?query=&limit=` | `search.cards` | query string                      |
+| `POST /mutate`           | `mutate`       | one mutation (the `zMutation` union)  |
+| `POST /mutate/batch`     | `mutate.batch` | `zMutation[]` or `{ "mutations": [] }`|
+| `POST /rpc`              | any method     | `{ "method": "...", "params": {} }`   |
+
+`POST /rpc` is the original JSON-RPC envelope (what the bundled MCP
+server uses); the REST routes are ergonomic aliases over the identical
+methods. A mutation's shape is the discriminated union documented under
+**Tools → Write** above (e.g. `{ "type": "card.create", "listId": "...",
+"title": "..." }`).
+
+`/mutate/batch` applies every mutation in **one transaction** recorded
+as a **single undo group** - one round trip, atomic, and one Ctrl+Z
+reverses the whole gesture. It rejects `restore` and `attachment.delete`
+(the latter needs a file-unlink the channel doesn't do).
+
+### Example
+
+```sh
+# discover (jq optional)
+PORT=$(jq -r .port  "$APPDATA/Kanbini/mcp.json")   # Windows path shown
+TOK=$(jq -r .token "$APPDATA/Kanbini/mcp.json")
+H="Authorization: Bearer $TOK"
+
+# read
+curl -s -H "$H" "http://127.0.0.1:$PORT/boards"
+curl -s -H "$H" "http://127.0.0.1:$PORT/search?query=design&limit=10"
+
+# write one card
+curl -s -H "$H" -H 'Content-Type: application/json' \
+  -d '{"type":"card.create","listId":"<id>","title":"From a script"}' \
+  "http://127.0.0.1:$PORT/mutate"
+
+# write several atomically (one undo group)
+curl -s -H "$H" -H 'Content-Type: application/json' \
+  -d '[{"type":"card.create","listId":"<id>","title":"A"},
+       {"type":"card.create","listId":"<id>","title":"B"}]' \
+  "http://127.0.0.1:$PORT/mutate/batch"
+```
+
+Errors are JSON `{ "error": "..." }` with `400` (validation / unknown
+method / bad body), `401` (missing or wrong token), `404` (no such
+route), or `500` (unexpected). The view + mutation **schemas are a
+stability contract** once you build on them - they're shared from
+`@kanbini/shared`.
+
+---
+
 ## Troubleshooting
 
 ### "Kanbini app is not running"
