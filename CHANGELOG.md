@@ -9,6 +9,38 @@ Releases are cut by pushing a `v*` tag, which builds the Windows
 installers and publishes a GitHub Release (see
 [`.github/workflows/release.yml`](.github/workflows/release.yml)).
 
+## [0.6.0] - 2026-06-19
+
+### Added
+
+- **Drive your board from your own scripts.** The local 127.0.0.1 channel
+  that powers the AI integration now also speaks a plain HTTP API: read
+  routes for boards, cards, and search, write routes for any change, and
+  a batch route that applies many edits at once as a single undo step.
+  Same machine-only access and token as before. It's for non-AI tooling,
+  automation, and a future mobile companion; the MCP server is unchanged
+  and still the way an assistant talks to Kanbini.
+
+### Changed
+
+- **Picking up a card or list is smoother.** It now eases off the spot
+  you grabbed instead of snapping to the cursor the instant you start
+  moving.
+- **Dropping a card into a list grows the list smoothly** instead of
+  jumping a card-height in one frame.
+- **Dragging a card across several lists no longer churns.** Lists you
+  only sweep past stay put instead of flickering open and closed, so a
+  long drag across the board stays smooth.
+
+### Fixed
+
+- **Putting the first card back no longer snaps.** Dragging the top card
+  of a list and dropping it back where it started no longer makes the
+  card below it jump into place.
+- **Empty lists no longer flash solid while you drag over them.** An
+  empty column now shows a subtle ring as the drop target and keeps your
+  board background showing through, instead of filling in opaque.
+
 ## [0.5.1] - 2026-06-17
 
 ### Changed
