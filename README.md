@@ -48,6 +48,10 @@ that never closes: a board that's yours, local, and always on.
   server (`@kanbini/mcp`) with read/write tools (get / create / update /
   move / delete / label / comment / checklist / search). Edits stream
   into the open UI live. See [`docs/MCP.md`](docs/MCP.md).
+- **Scriptable HTTP API** - the same token-gated 127.0.0.1 control channel
+  is also a plain local HTTP API (REST routes for reads + writes, plus a
+  batch endpoint that lands as one undo step) for non-MCP tools, scripts,
+  and automation. Loopback only. See [`docs/MCP.md`](docs/MCP.md).
 - **Own your data** - lossless plain-text export/import (`kanbini.json` +
   `cards/*.md` + attachment files); Backup + Restore live in Settings.
 - **Cross-board search** via a Ctrl/Cmd+F command palette.
