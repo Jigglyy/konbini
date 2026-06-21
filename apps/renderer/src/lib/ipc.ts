@@ -47,6 +47,10 @@ export const ipc = {
     bridge().mutateBatch(ms),
   attachmentAdd: (cardId: string): Promise<AttachmentView | null> =>
     bridge().attachmentAdd(cardId),
+  /** Attach the clipboard image to a card; resolves null on a non-image
+   *  (text) paste. */
+  attachmentPasteImage: (cardId: string): Promise<AttachmentView | null> =>
+    bridge().attachmentPasteImage(cardId),
   linkPreviewCreate: (req: LinkPreviewRequest): Promise<LinkPreviewResult> =>
     bridge().linkPreviewCreate(req),
   exportNow: (): Promise<ExportSummary> => bridge().exportNow(),

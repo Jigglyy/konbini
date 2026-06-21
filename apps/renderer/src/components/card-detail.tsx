@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import type { BoardView, CardView } from '@kanbini/shared'
 import { useBoard } from '../hooks/useBoard'
@@ -13,6 +13,7 @@ import { PriorityBadge } from './priority'
 import { Modal } from './ui/modal'
 import { MarkdownField } from './ui/markdown-editor'
 import { UrlCoverModal } from './url-cover-modal'
+import { ipc } from '../lib/ipc'
 
 // Card detail modal (M2 chunk A): editable title + description (TipTap
 // → Markdown). Labels, due, completion are shown read-only here; they
@@ -74,6 +75,31 @@ export function CardDetail({
     if (cardId && data && !card) onClose()
   }, [cardId, data, card, onClose])
 
+  // Ctrl/Cmd+V while a card is open: if the clipboard holds an image,
+  // attach it to this card. Main returns null for a non-image paste, so a
+  // plain text paste into the title/description falls through untouched;
+  // we don't preventDefault for that reason. The broadcast after a
+  // successful attach refetches the board, so the new attachment appears.
+  // Debounced so one Ctrl+V is one attach: it guards against key-repeat
+  // (holding the keys), an accidental rapid double-press of the same
+  // clipboard, and a duplicate keydown observed in the Electron env.
+  const lastPasteAtRef = useRef(0)
+  useEffect(() => {
+    const id = card?.id
+    if (!id) return
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.repeat) return
+      if (!(e.ctrlKey || e.metaKey) || e.altKey) return
+      if (e.key !== 'v' && e.key !== 'V') return
+      const now = Date.now()
+      if (now - lastPasteAtRef.current < 800) return
+      lastPasteAtRef.current = now
+      void ipc.attachmentPasteImage(id).catch(() => {})
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [card?.id])
+
   if (!card) return <Modal open={false} onClose={onClose}>{null}</Modal>
 
   const saveTitle = (): void => {
@@ -125,7 +151,11 @@ export function CardDetail({
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault()
-                  saveTitle()
+                  // Just blur: onBlur runs saveTitle once. Calling
+                  // saveTitle() here AND blurring fired it twice (the
+                  // optimistic update hasn't synced card.title back yet, so
+                  // the blur's saveTitle still sees a changed title) - two
+                  // card.update mutations + two "renamed" activity rows.
                   ;(e.target as HTMLInputElement).blur()
                 }
               }}

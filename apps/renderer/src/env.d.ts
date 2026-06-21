@@ -43,6 +43,7 @@ declare global {
       mutate: (m: Mutation) => Promise<MutationResult>
       mutateBatch: (ms: Mutation[]) => Promise<MutationResult[]>
       attachmentAdd: (cardId: string) => Promise<AttachmentView | null>
+      attachmentPasteImage: (cardId: string) => Promise<AttachmentView | null>
       linkPreviewCreate: (
         req: LinkPreviewRequest
       ) => Promise<LinkPreviewResult>

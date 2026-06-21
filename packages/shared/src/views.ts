@@ -31,6 +31,10 @@ export type AttachmentView = z.infer<typeof zAttachmentView>
 export const zAttachmentAddRequest = z.object({ cardId: z.string() })
 export type AttachmentAddRequest = z.infer<typeof zAttachmentAddRequest>
 
+/** Request payload for `attachment:pasteImage` (clipboard image paste). */
+export const zAttachmentPasteRequest = z.object({ cardId: z.string() })
+export type AttachmentPasteRequest = z.infer<typeof zAttachmentPasteRequest>
+
 /** Request payload for `board:setBackgroundImage` (ADR-0034). Opens
  *  a file dialog in main, copies the chosen image under
  *  `userData/board-backgrounds/<boardId>/`, then applies the

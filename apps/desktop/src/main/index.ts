@@ -6,6 +6,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path'
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -20,6 +21,7 @@ import {
   newId,
   zAppInfo,
   zAttachmentAddRequest,
+  zAttachmentPasteRequest,
   zAttachmentView,
   zBoardBackground,
   zBoardSetBackgroundImageRequest,
@@ -473,6 +475,51 @@ function registerIpc(
       relPath,
       mime,
       size: stat.size,
+      sourceUrl: null,
+      sourceTitle: null,
+      createdAt: Date.now()
+    })
+  })
+
+  // Paste an image from the system clipboard onto a card (Ctrl/Cmd+V
+  // while a card is open). Unlike attachmentAdd there's no dialog: main
+  // reads the clipboard image directly, so we work regardless of which
+  // field (if any) has focus in the renderer. Returns null on a non-image
+  // paste so the renderer can fire this on every Ctrl+V cheaply and let a
+  // plain text paste fall through untouched.
+  ipcMain.handle(IPC.attachmentPasteImage, async (_event, raw: unknown) => {
+    const { cardId } = zAttachmentPasteRequest.parse(raw)
+    const image = clipboard.readImage()
+    if (image.isEmpty()) return null
+    // Normalise to PNG - lossless and what the clipboard hands back for a
+    // screenshot anyway.
+    const png = image.toPNG()
+    if (png.length === 0) return null
+
+    const id = newId()
+    const filename = `pasted-${Date.now()}.png`
+    const destDir = join(attachmentsRoot, id)
+    await fsp.mkdir(destDir, { recursive: true })
+    const dest = join(destDir, filename)
+    await fsp.writeFile(dest, png)
+    const relPath = `attachments/${id}/${filename}`
+    const mime = 'image/png'
+
+    const { boardId } = createAttachment(db, {
+      id,
+      cardId,
+      filename,
+      relPath,
+      mime,
+      size: png.length
+    })
+    broadcastChange(boardId)
+    return zAttachmentView.parse({
+      id,
+      filename,
+      relPath,
+      mime,
+      size: png.length,
       sourceUrl: null,
       sourceTitle: null,
       createdAt: Date.now()

@@ -154,7 +154,7 @@ describe('<CardDetail>', () => {
     })
   })
 
-  it('title rename via Enter blurs + commits', async () => {
+  it('title rename via Enter blurs + commits exactly once', async () => {
     const user = userEvent.setup()
     const mock = kanbiniMock()
     renderWithBoard(makeCard({ title: 'Original' }))
@@ -168,6 +168,26 @@ describe('<CardDetail>', () => {
         patch: { title: 'Via enter' }
       })
     })
+    // Regression: Enter used to call saveTitle() AND blur (which calls it
+    // again), firing two card.update mutations + two "renamed" activity rows.
+    expect(mock.mutate).toHaveBeenCalledTimes(1)
+  })
+
+  it('Ctrl+V while the card is open attaches a clipboard image', async () => {
+    const mock = kanbiniMock()
+    renderWithBoard(makeCard({ id: 'c1' }))
+    fireEvent.keyDown(document, { key: 'v', ctrlKey: true })
+    await waitFor(() => {
+      expect(mock.attachmentPasteImage).toHaveBeenCalledWith('c1')
+    })
+  })
+
+  it('a non-paste keystroke does not try to attach a clipboard image', () => {
+    const mock = kanbiniMock()
+    renderWithBoard(makeCard({ id: 'c1' }))
+    fireEvent.keyDown(document, { key: 'a', ctrlKey: true }) // not V
+    fireEvent.keyDown(document, { key: 'v' }) // V without a modifier
+    expect(mock.attachmentPasteImage).not.toHaveBeenCalled()
   })
 
   it('title rename no-ops when the trimmed value matches the original', async () => {

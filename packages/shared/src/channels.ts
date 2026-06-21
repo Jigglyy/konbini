@@ -18,6 +18,12 @@ export const IPC = {
    *  userData/attachments, insert row, return the new AttachmentView
    *  (null if the user cancelled). */
   attachmentAdd: 'attachment:add',
+  /** renderer → main: attach the image currently on the system clipboard
+   *  to a card (Ctrl/Cmd+V while a card is open). Main reads the clipboard
+   *  image directly, writes it as a PNG under userData/attachments, and
+   *  inserts an attachment row. Returns the new AttachmentView, or null
+   *  when the clipboard holds no image (a plain text paste). */
+  attachmentPasteImage: 'attachment:pasteImage',
   /** renderer → main: fetch OG metadata + preview image from a URL,
    *  copy the image into userData/attachments, insert an attachment
    *  row (sourceUrl/sourceTitle set), then make it the card's cover.

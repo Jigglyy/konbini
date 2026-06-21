@@ -76,6 +76,9 @@ function makeBridge() {
     attachmentAdd: vi.fn(
       async (_cardId: string): Promise<AttachmentView | null> => null
     ),
+    attachmentPasteImage: vi.fn(
+      async (_cardId: string): Promise<AttachmentView | null> => null
+    ),
     linkPreviewCreate: vi.fn(
       async (_req: LinkPreviewRequest): Promise<LinkPreviewResult> => ({
         ok: false,

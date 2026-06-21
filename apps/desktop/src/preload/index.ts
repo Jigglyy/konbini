@@ -53,6 +53,11 @@ const api = {
     ipcRenderer.invoke(IPC.mutateBatch, mutations),
   attachmentAdd: (cardId: string): Promise<AttachmentView | null> =>
     ipcRenderer.invoke(IPC.attachmentAdd, { cardId }),
+  /** Attach the clipboard image to a card (Ctrl/Cmd+V). Resolves null when
+   *  the clipboard holds no image, so the renderer can call it on any
+   *  paste and let a text paste fall through. */
+  attachmentPasteImage: (cardId: string): Promise<AttachmentView | null> =>
+    ipcRenderer.invoke(IPC.attachmentPasteImage, { cardId }),
   /** M4-H / ADR-0023: opt-in link-preview fetch. Renderer must gate
    *  on settings.linkPreviews - main does the network egress and the
    *  fetched preview is stored as a normal local attachment so the
