@@ -58,6 +58,53 @@ function logActivity(
     .run()
 }
 
+/** Coalesce window for a continuous description-editing session. The
+ *  card-detail editor live-saves the description every ~500ms while you
+ *  type (crash safety), so a single edit fires many card.update
+ *  mutations. Logging one 'description' activity per save would spam the
+ *  card's history with entries for an unfinished edit. */
+const DESCRIPTION_ACTIVITY_COALESCE_MS = 5 * 60 * 1000
+
+/** Log a description edit, coalescing a continuous writing session into
+ *  ONE feed entry: if the card's most recent activity is already a
+ *  description edit within the window, bump its timestamp instead of
+ *  inserting a new row. A description edit after some OTHER activity (the
+ *  most recent isn't a description), or after the window has lapsed,
+ *  still logs a fresh entry. The lookup tiebreaks createdAt with the
+ *  UUIDv7 id (monotonic in-process) so it's deterministic even when
+ *  saves land in the same millisecond. */
+function logDescriptionActivity(
+  db: Db,
+  boardId: string | null,
+  cardId: string
+): void {
+  if (!boardId) return
+  const last = db
+    .select({
+      id: activity.id,
+      type: activity.type,
+      createdAt: activity.createdAt
+    })
+    .from(activity)
+    .where(eq(activity.cardId, cardId))
+    .orderBy(desc(activity.createdAt), desc(activity.id))
+    .limit(1)
+    .get()
+  const ts = now()
+  if (
+    last &&
+    last.type === 'description' &&
+    ts - last.createdAt < DESCRIPTION_ACTIVITY_COALESCE_MS
+  ) {
+    db.update(activity)
+      .set({ createdAt: ts })
+      .where(eq(activity.id, last.id))
+      .run()
+    return
+  }
+  logActivity(db, { boardId, cardId, type: 'description' })
+}
+
 /** Append position: a key after the last sibling (by position). */
 /** Resolve the projectId for a hidden-projects `board.create` (M4-G):
  *  reuse the lone existing project; if none exist, create a "Default"
@@ -461,7 +508,7 @@ export function applyMutation(db: Db, m: Mutation): MutationResult {
         })
       }
       if (m.patch.description !== undefined) {
-        logActivity(db, { boardId, cardId: m.id, type: 'description' })
+        logDescriptionActivity(db, boardId, m.id)
       }
       if (m.patch.coverAttachmentId !== undefined) {
         logActivity(db, {

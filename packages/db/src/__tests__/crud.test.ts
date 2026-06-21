@@ -932,6 +932,41 @@ describe('activity log', () => {
     expect(types).toContain('completed')
   })
 
+  it('coalesces a burst of live description saves into one feed entry', () => {
+    const { cardId } = seedBoard()
+    const descCount = (): number =>
+      getCardView(db, cardId)!.activities.filter((a) => a.type === 'description')
+        .length
+    const before = descCount()
+    // The editor live-saves the description every ~500ms while you type -
+    // several card.updates for one unfinished edit. They must NOT each log
+    // their own feed entry.
+    applyMutation(db, { type: 'card.update', id: cardId, patch: { description: 'Hel' } })
+    applyMutation(db, { type: 'card.update', id: cardId, patch: { description: 'Hello' } })
+    applyMutation(db, {
+      type: 'card.update',
+      id: cardId,
+      patch: { description: 'Hello world' }
+    })
+    // One entry for the whole writing session, not three.
+    expect(descCount()).toBe(before + 1)
+    // ...and the card still holds the final text.
+    expect(getCardView(db, cardId)!.description).toBe('Hello world')
+  })
+
+  it('logs a fresh description entry once another activity breaks the streak', () => {
+    const { cardId } = seedBoard()
+    const descCount = (): number =>
+      getCardView(db, cardId)!.activities.filter((a) => a.type === 'description')
+        .length
+    applyMutation(db, { type: 'card.update', id: cardId, patch: { description: 'first' } })
+    // A different action between the two edits means they're separate
+    // sessions - the second one is no longer the "continuation" of the first.
+    applyMutation(db, { type: 'card.update', id: cardId, patch: { title: 'renamed' } })
+    applyMutation(db, { type: 'card.update', id: cardId, patch: { description: 'second' } })
+    expect(descCount()).toBe(2)
+  })
+
   it('card.move on a nonexistent card logs nothing and returns boardId null', () => {
     const { listId } = seedBoard()
     // Raw row count: the phantom 'moved' row carried the TARGET
