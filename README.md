@@ -39,7 +39,9 @@ that never closes: a board that's yours, local, and always on.
   labels, due dates, priorities, per-list colours, and swimlanes (group
   by priority).
 - **Card depth** - WYSIWYG description (saved as Markdown), checklists,
-  comments, local attachments, cover images, and a per-card activity log.
+  comments, local attachments (paste an image straight in), cover images,
+  and a per-card activity log. Cards with a description show a small marker
+  in the list.
 - **Multi-select** - Ctrl/Cmd-click cards (or Shift-click for a range) to
   pick several at once, then complete, set priority, re-label, move, or
   delete them in bulk from a floating action bar (or a right-click menu) -
