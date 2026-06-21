@@ -83,6 +83,7 @@ import { ContextMenu } from './ui/context-menu'
 import { CardLabels } from './labels'
 import { CardDetail } from './card-detail'
 import { CardChecklistPreview } from './checklists'
+import { DescriptionBadge } from './description-badge'
 import { DueBadge } from './due-date'
 import { PriorityBadge } from './priority'
 import { CardMenu } from './card-menu'
@@ -435,6 +436,7 @@ function CardFace({
       </div>
       <TitleUrlChip title={card.title} />
       <div className="flex flex-wrap items-center gap-1.5">
+        <DescriptionBadge card={card} />
         <PriorityBadge card={card} />
         <DueBadge card={card} />
       </div>
@@ -2591,6 +2593,7 @@ const SortableCard = memo(function SortableCard({
   const metaEl = useMemo(
     () => (
       <div className="flex flex-wrap items-center gap-1.5">
+        <DescriptionBadge card={card} />
         <PriorityBadge card={card} />
         <DueBadge card={card} />
       </div>
