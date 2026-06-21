@@ -9,6 +9,30 @@ Releases are cut by pushing a `v*` tag, which builds the Windows
 installers and publishes a GitHub Release (see
 [`.github/workflows/release.yml`](.github/workflows/release.yml)).
 
+## [0.7.0] - 2026-06-21
+
+### Added
+
+- **Paste an image to attach it.** With a card open, Ctrl/Cmd+V pastes an
+  image from your clipboard (a screenshot, a copied picture) straight onto
+  the card as an attachment. A plain text paste still goes to the title or
+  description as before.
+- **Cards show a marker when they have a description.** A small icon leads
+  a card's badges in the list once it has a description, so you can tell at
+  a glance which cards have notes. Cards without one look unchanged.
+- **Linux build.** Kanbini can now be packaged as a Linux **AppImage** (one
+  self-contained binary, no install step), built from a Linux host. See
+  [`docs/PACKAGING.md`](docs/PACKAGING.md).
+
+### Fixed
+
+- **Editing a description no longer spams the card's history.** The
+  description still saves as you type (nothing is lost), but a continuous
+  edit now records a single entry in the activity log instead of one per
+  pause.
+- **Renaming a card with Enter records the change once.** Pressing Enter to
+  finalize a new title no longer updates the card twice.
+
 ## [0.6.0] - 2026-06-19
 
 ### Added
