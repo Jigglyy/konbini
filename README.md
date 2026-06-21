@@ -80,10 +80,11 @@ pnpm --filter @kanbini/desktop rebuild:native
 ```
 
 To build a real installer, see [`docs/PACKAGING.md`](docs/PACKAGING.md)
-(Windows NSIS + portable `.exe`; macOS `.dmg` and Linux AppImage build
-from the same codebase). **Windows is the primary tested target**;
-macOS and Linux are buildable from the same Electron source but less
-exercised.
+(Windows NSIS + portable `.exe`; macOS `.dmg`; and a Linux **AppImage**,
+built from a Linux host or WSL2 - see [Building for
+Linux](docs/PACKAGING.md#building-for-linux)). **Windows is the primary
+tested target**; the macOS and Linux recipes build from the same Electron
+source but haven't been smoke-tested yet.
 
 ## Wire up an AI
 

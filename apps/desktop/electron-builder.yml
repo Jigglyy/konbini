@@ -148,9 +148,16 @@ mac:
   # the v1 release; recipe stays here for the day notarization
   # ($99/yr Apple Developer Program + Mac host) makes sense.
 
-# --- Linux (best-effort, not in M5 scope) ----------------------------
-# AppImage so a single self-contained binary works across distros
-# without a packaging maintainer relationship. Not advertised in v1.
+# --- Linux -----------------------------------------------------------
+# AppImage: one self-contained binary that runs across distros with no
+# install step (chmod +x and run) and no built-in updater pinging out,
+# which fits the offline / no-auto-update ethos. Runs unsigned with no
+# Gatekeeper/SmartScreen-style gate. MUST be built from a Linux host -
+# electron-builder can't cross-compile the better-sqlite3 native binding
+# from Windows. The postpackage check-payload guard is NSIS-specific and
+# skips cleanly off-Windows (logs SKIP, exits 0). Step-by-step in
+# docs/PACKAGING.md "Building for Linux"; add deb/rpm to `target` here if
+# a distro-native package is ever wanted.
 linux:
   target:
     - AppImage

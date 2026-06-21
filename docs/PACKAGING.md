@@ -60,6 +60,70 @@ ends up populated either way; subsequent builds re-use it without
 re-extracting. The Mac dylibs aren't actually used for Windows-target
 builds - electron-builder just extracts the whole archive regardless.
 
+## Building for Linux
+
+Linux ships as a single **AppImage** (`linux.target` in
+`electron-builder.yml`): a self-contained binary that runs across distros
+with no install step and no auto-updater pinging out, which fits the
+offline ethos. It runs unsigned with no Gatekeeper/SmartScreen-style gate:
+
+```bash
+chmod +x Kanbini-X.Y.Z.AppImage
+./Kanbini-X.Y.Z.AppImage
+```
+
+**It must be built from a Linux host.** electron-builder cannot
+cross-compile the `better-sqlite3` native binding from Windows, so a
+Windows machine cannot produce a working Linux build. Any of these hosts
+work:
+
+- A native Linux box (x64).
+- **WSL2** on the Windows dev machine (a full Linux userland; install the
+  build tools the same way as on native Linux).
+- A Linux CI runner (GitHub Actions `ubuntu-latest`).
+- A Docker image with the toolchain baked in (`electronuserland/builder`).
+
+### Steps (native Linux or WSL2)
+
+```bash
+# 1. Build toolchain for the native module (Debian/Ubuntu shown).
+sudo apt-get install -y build-essential python3
+
+# 2. Install deps + put better-sqlite3 on the Electron 41 ABI.
+pnpm install
+pnpm --filter @kanbini/desktop run rebuild:native
+
+# 3. Verify the bundle loads. A headless host has no display, so wrap
+#    the launch-smoke (and e2e) in a virtual one.
+xvfb-run -a pnpm verify
+
+# 4. Package the AppImage.
+pnpm --filter @kanbini/desktop run package
+# Output: apps/desktop/release/Kanbini-X.Y.Z.AppImage
+```
+
+`prepackage.mjs` runs the same MCP-build + ABI-rebuild + electron-vite
+steps it does on Windows. `ensure-electron-abi.mjs` probes whether the
+binding loads under Electron and, if not, runs `electron-rebuild` to put
+`better-sqlite3` on the Electron 41 ABI - downloading a prebuilt when one
+exists for your platform, compiling from source otherwise (which is why
+step 1 installs a toolchain). So step 2 is usually a fast no-op after the
+first run.
+
+The `postpackage` `check-payload.mjs` guard inspects the NSIS installer
+payload and is Windows-only; on Linux it logs `SKIP` and exits 0, so the
+AppImage build completes without payload verification (there is no
+AppImage equivalent yet).
+
+> **Status (2026-06):** the codebase is Linux-clean - every `win32` /
+> `darwin` branch in `main` no-ops on Linux, the renderer falls back to
+> the correct userData path (`~/.config/Kanbini`) and modifier keys
+> (Ctrl, not Cmd), and the AppImage target + Linux icon
+> (`build/icon.png`) are already configured. But no Linux build has been
+> smoke-tested. Treat the first one as unverified until
+> `xvfb-run -a pnpm verify` and a manual launch pass are green on the
+> target host.
+
 ## Verifying a packaged build
 
 The app's `--launch-smoke` flag boots through migrations + opens the
