@@ -9,6 +9,20 @@ Releases are cut by pushing a `v*` tag, which builds the Windows
 installers and publishes a GitHub Release (see
 [`.github/workflows/release.yml`](.github/workflows/release.yml)).
 
+## [0.7.1] - 2026-06-22
+
+### Fixed
+
+- **Dragging no longer snaps back on drop.** Moving a card within a list
+  (one with more than one card) or reordering a list column used to glide
+  to the drop spot, jump back to where it started, then snap into place.
+  Both now land smoothly where you drop them.
+- **Clicking a card to open it no longer leaves it looking selected.** A
+  plain click opens the card without the selection outline; only
+  Ctrl/Cmd-click (or Shift-click for a range) selects cards, shown by the
+  outline plus a corner checkmark. Keyboard navigation still shows its
+  focus outline as before.
+
 ## [0.7.0] - 2026-06-21
 
 ### Added
