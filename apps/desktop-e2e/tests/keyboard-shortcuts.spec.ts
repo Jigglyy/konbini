@@ -58,20 +58,22 @@ async function expectFocused(page: Page, text: string): Promise<void> {
   await expect(card(page, text)).toHaveClass(/ring-2/)
 }
 
-// Click the card to focus it. The title span ALSO opens the detail
-// modal as a side effect (no stopPropagation by design - drag activation
-// disambiguates click vs drag); for keyboard-shortcut tests we want the
-// focus state without the modal getting in the way of subsequent
-// interactions. Press Escape to dismiss - focus state (board.tsx
-// `focusedCardId`) is independent of the modal's `openCardId` state, so
-// the ring stays on the card.
+// Put keyboard focus on a specific card. A click sets the board's
+// `focusedCardId` (so the keyboard handlers act on this card) and opens
+// the detail modal as a side effect; Escape dismisses it. Note: a plain
+// click no longer PAINTS the focus ring - only Ctrl/Cmd-click selection
+// and keyboard navigation do, so a click-to-open doesn't leave a card
+// looking selected. `focusedCardId` is still set independently of the
+// modal, so the first arrow / action key in each test operates from this
+// card (and a nav key lights the ring on its result, which `expectFocused`
+// then checks). The modal-closed wait is the sync point confirming the
+// click + focus committed before the test proceeds.
 async function focusCard(page: Page, text: string): Promise<void> {
   await card(page, text).click()
   await page.keyboard.press('Escape')
   await expect(
     page.getByRole('dialog', { name: text })
   ).not.toBeVisible()
-  await expectFocused(page, text)
 }
 
 // ─── Focus navigation ─────────────────────────────────────────────

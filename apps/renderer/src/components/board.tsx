@@ -9,7 +9,11 @@ import {
   type CSSProperties
 } from 'react'
 import { flushSync } from 'react-dom'
-import { useQueryClient } from '@tanstack/react-query'
+import {
+  defaultScheduler,
+  notifyManager,
+  useQueryClient
+} from '@tanstack/react-query'
 import {
   DndContext,
   DragOverlay,
@@ -201,6 +205,33 @@ const DROP_ANIMATION: DropAnimation = {
   sideEffects: defaultDropAnimationSideEffects({
     styles: { active: { opacity: '0' } }
   })
+}
+
+/** Commit an optimistic cache write SYNCHRONOUSLY so a dnd-kit drop
+ *  animation measures the REORDERED DOM, not the stale pre-drag layout.
+ *
+ *  The snap-back bug: a reorder applied at drop (a same-list card move, or
+ *  a list-column move) must be on screen before dnd-kit's drop-animation
+ *  layout effect measures the source node's rect - otherwise it measures
+ *  the OLD slot, glides the overlay back there, and the item jumps to its
+ *  new slot only once the write renders ("goes to the new spot, snaps back,
+ *  then lands"). A plain `qc.setQueryData` - even wrapped in `flushSync` -
+ *  is too late: React Query's default scheduler (`systemSetTimeoutZero`)
+ *  defers observer notifications to a macrotask, so App (which owns the
+ *  board query and passes it down) re-renders AFTER the measurement.
+ *
+ *  This swaps React Query to a synchronous scheduler just for the write, so
+ *  `flushSync` actually re-renders App -> Board with the reorder before the
+ *  measure, then restores the default. Scoped + restored in `finally` so no
+ *  other query notification stays synchronous (the async batching the drag
+ *  perf work relies on is untouched outside this one call). */
+function flushCacheSync(write: () => void): void {
+  notifyManager.setScheduler((cb) => cb())
+  try {
+    flushSync(write)
+  } finally {
+    notifyManager.setScheduler(defaultScheduler)
+  }
 }
 
 // Auto cover from URL in title (ADR-0033). When linkPreviews +
@@ -592,6 +623,13 @@ export function Board({
   // focused card disappears from the view (deleted / archived / list
   // closed). The card-detail modal opens via the existing setOpenCardId.
   const [focusedCardId, setFocusedCardId] = useState<string | null>(null)
+  // Whether the keyboard-focus ring is currently PAINTED. A plain mouse
+  // click moves keyboard focus (so shortcuts act on the clicked card) but
+  // suppresses the ring - clicking a card to open it shouldn't leave it
+  // looking "selected" (only Ctrl/Cmd-click selection shows a ring + a
+  // corner checkmark). Keyboard navigation (arrows / j-k / move) re-shows
+  // the ring. `ringCardId` below folds this into the per-card focus prop.
+  const [focusRingVisible, setFocusRingVisible] = useState(false)
   // Multi-select (separate from `focusedCardId`, which is keyboard nav):
   // a set of cards picked with Ctrl/Cmd+click (toggle) or Shift+click
   // (range within a list), acted on as a group via the floating
@@ -802,8 +840,9 @@ export function Board({
   /** Re-focus a card and scroll it into view (smoothly, but cheap -
    *  the browser handles the actual scroll). Uses a data attribute so
    *  the card components don't need to expose refs upward. */
-  const focusCard = useCallback((id: string | null): void => {
+  const focusCard = useCallback((id: string | null, showRing = true): void => {
     setFocusedCardId(id)
+    setFocusRingVisible(showRing)
     if (!id) return
     // requestAnimationFrame lets React commit the focused style + any
     // sibling reorder first, so scrollIntoView lands on the final box.
@@ -933,8 +972,12 @@ export function Board({
       // refactor dropped this when it replaced the per-card
       // onClick={() => onFocus(card.id)} with this handler - every
       // focus-dependent shortcut silently broke until you arrow-keyed
-      // first (caught by keyboard-shortcuts.spec).
-      focusCard(cardId)
+      // first (caught by keyboard-shortcuts.spec). `showRing: false` -
+      // a mouse click moves focus but must NOT paint the ring, so a
+      // click-to-open doesn't leave the card looking selected (only a
+      // Ctrl/Cmd-click selection shows a ring + corner checkmark). A
+      // subsequent keyboard nav key re-shows the ring.
+      focusCard(cardId, false)
       const intent = clickIntent(e)
       if (intent === 'open') {
         setSelectedIds(EMPTY_SELECTION)
@@ -1103,6 +1146,11 @@ export function Board({
   const bulkActionsRef = useRef(bulkActions)
   bulkActionsRef.current = bulkActions
   const multiSelectActive = selectedIds.size > 1
+  // The card whose focus ring is actually painted: the keyboard-focused
+  // card, but only while the ring is meant to show (suppressed after a
+  // plain mouse click - see `focusRingVisible`). `focusedCardId` itself
+  // stays set so keyboard shortcuts still act on the clicked card.
+  const ringCardId = focusRingVisible ? focusedCardId : null
   const renderBulkMenu = useCallback(
     (close: () => void) => (
       <BulkCardMenu actions={bulkActionsRef.current} close={close} />
@@ -1331,7 +1379,9 @@ export function Board({
     startPickupAnim()
     clearCrossDwell() // no stale pending cross-list commit from a prior drag
     // List-column drag: record which list is moving (drives the overlay
-    // preview) and bail before any of the card-specific setup.
+    // preview) and bail before any of the card-specific setup. No cache is
+    // touched during a list drag (the strategy glides the siblings), so no
+    // snapshot is needed - the reorder is applied once on drop.
     if (isListSortableId(activeId)) {
       setDraggingListId(listIdFromSortable(activeId))
       return
@@ -1365,8 +1415,11 @@ export function Board({
   function onDragOver(e: DragOverEvent): void {
     const { active, over } = e
     // List-column drag: horizontalListSortingStrategy glides the sibling
-    // columns via pure CSS transforms, so there's nothing to reorder in
-    // the cache here. The final order is applied once on drop.
+    // columns via pure CSS transforms during the drag, so there's nothing
+    // to reorder in the cache here. The final order is applied once on drop
+    // (onListDragEnd), committed synchronously via flushCacheSync so the
+    // drop animation glides into place (same no-snap mechanism as a
+    // same-list card move).
     if (isListSortableId(String(active.id))) return
     if (!over) {
       setBlockedListId(null)
@@ -1532,7 +1585,20 @@ export function Board({
         const reordered = reduceCardMove(b, activeId, overId, position)
         if (reordered !== b) {
           b = reordered
-          qc.setQueryData<BoardView | null>(key, b)
+          // A same-list reorder happens here AT drop (onDragOver leaves
+          // same-list moves to the strategy - live-reordering same-list
+          // every frame churns dnd-kit's FLIP and crashes StrictMode-dev -
+          // so the dragged card's DOM node never left its original slot
+          // during the drag). It MUST be on screen before dnd-kit measures
+          // the source for its drop animation, or the overlay glides back
+          // to the old slot and the card snaps to its new one. A plain
+          // setQueryData renders too late (React Query defers the notify),
+          // so commit it synchronously. A cross-list drop the onDragOver
+          // DWELL already committed is a no-op here (reduceCardMove returns
+          // `b`), so this only fires for the at-drop reorder that needs it.
+          flushCacheSync(() => {
+            qc.setQueryData<BoardView | null>(key, b)
+          })
         }
       }
     }
@@ -1663,10 +1729,17 @@ export function Board({
       })
   }
 
-  /** List-column drag end. The strategy already glided the siblings, so
-   *  we just resolve the dropped-on column, compute the fractional-index
-   *  neighbours, and persist via the standard `apply` path (optimistic
-   *  reorder + undo-recorded list.move). */
+  /** List-column drag end. The strategy glided the siblings during the
+   *  drag (no cache change); here we resolve the dropped-on column, apply
+   *  the reorder, and persist the undo-recorded list.move.
+   *
+   *  The reorder is committed via `flushCacheSync` (NOT a plain
+   *  setQueryData / `apply`): a list never reorders during the drag, so the
+   *  dragged column's DOM node is still at its original slot when dnd-kit
+   *  measures it for the drop animation. The reorder must be on screen
+   *  before that measure or the overlay glides back to the origin and the
+   *  column snaps to its new slot afterward. See `flushCacheSync`. The raw
+   *  `ipc.mutate` records the undo entry exactly like `apply` would. */
   function onListDragEnd(e: DragEndEvent): void {
     setDraggingListId(null)
     const { active, over } = e
@@ -1675,27 +1748,41 @@ export function Board({
     if (!isListSortableId(overId)) return
     const activeListId = listIdFromSortable(String(active.id))
     const overListId = listIdFromSortable(overId)
+    if (activeListId === overListId) return
     const visibleIds = board.lists
       .filter((l) => !l.closed)
       .map((l) => l.id)
     const plan = planListMove(visibleIds, activeListId, overListId)
     if (!plan) return
-    apply(
-      {
+    const prev = qc.getQueryData<BoardView | null>(key)
+    if (prev) {
+      flushCacheSync(() => {
+        qc.setQueryData<BoardView | null>(key, {
+          ...prev,
+          lists: reorderVisibleLists(prev.lists, plan.orderedIds)
+        })
+      })
+    }
+    void ipc
+      .mutate({
         type: 'list.move',
         id: activeListId,
         beforeId: plan.beforeId,
         afterId: plan.afterId
-      },
-      (b) => ({ ...b, lists: reorderVisibleLists(b.lists, plan.orderedIds) })
-    )
+      })
+      .catch(() => {
+        if (prev) qc.setQueryData(key, prev)
+      })
+      .finally(() => {
+        void qc.invalidateQueries({ queryKey: key })
+      })
   }
 
   function onDragCancel(): void {
     stopPickupAnim()
     clearCrossDwell()
     // A cancelled list drag just clears the overlay state - no cache was
-    // touched during the drag.
+    // touched during the drag (the reorder only happens on a real drop).
     if (draggingListId) {
       setDraggingListId(null)
       return
@@ -1802,7 +1889,7 @@ export function Board({
                     labelsExpanded={labelsExpanded}
                     onToggleLabelsExpanded={onToggleLabelsExpanded}
                     anyDragging={dragging != null}
-                    focused={focusedCardId === card.id}
+                    focused={ringCardId === card.id}
                     selected={selectedIds.has(card.id)}
                     multiActive={multiSelectActive}
                     multiDragActive={multiDragActive}
@@ -1833,7 +1920,7 @@ export function Board({
                   labelsExpanded={labelsExpanded}
                   onToggleLabelsExpanded={onToggleLabelsExpanded}
                   anyDragging={dragging != null || draggingListId != null}
-                  focusedCardId={focusedCardId}
+                  focusedCardId={ringCardId}
                   selectedIds={selectedIds}
                   multiActive={multiSelectActive}
                   multiDragActive={multiDragActive}
@@ -1914,7 +2001,7 @@ export function Board({
               card={dragging}
               labels={board.labels}
               dragging
-              focused={focusedCardId === dragging.id}
+              focused={ringCardId === dragging.id}
               selected={selectedIds.has(dragging.id)}
               showChecklist={showChecklist}
               labelsExpanded={labelsExpanded}

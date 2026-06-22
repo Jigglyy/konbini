@@ -79,6 +79,42 @@ test('Ctrl+click multi-selects cards and a bulk action hits them all', async () 
   await expect(page.getByText('2 selected')).toHaveCount(0)
 })
 
+test('a plain click opens a card without leaving it selected', async () => {
+  const { page } = handle
+
+  await page
+    .getByRole('heading', { name: 'Welcome Board', exact: true })
+    .click()
+  await expect(page.getByRole('heading', { name: /^To Do\b/ })).toBeVisible()
+
+  const addCard = page.getByPlaceholder('+ Add a card').first()
+  await addCard.click()
+  await addCard.fill('Solo')
+  await addCard.press('Enter')
+  await expect(page.getByText('Solo', { exact: true })).toBeVisible()
+
+  const solo = page.locator('[data-card-id]', { hasText: /^Solo$/ })
+
+  // A plain click opens the detail. Closing it must leave NO selection
+  // visual on the card: no focus/selection ring (`ring-2`) and no count
+  // bar. Before the fix, the click moved keyboard focus AND painted the
+  // ring, so a click-to-open left the card looking selected (just without
+  // the corner checkmark) - the reported bug.
+  await page.getByText('Solo', { exact: true }).click()
+  await expect(page.getByRole('dialog', { name: 'Solo' })).toBeVisible()
+  await page.getByRole('button', { name: 'Close' }).click()
+  await expect(page.getByRole('dialog', { name: 'Solo' })).not.toBeVisible()
+  await expect(solo).not.toHaveClass(/ring-2/)
+  await expect(page.getByText('1 selected')).toHaveCount(0)
+
+  // Ctrl+click is the ONLY way to select: it paints the ring + shows the
+  // count bar and does NOT open the detail.
+  await page.getByText('Solo', { exact: true }).click({ modifiers: ['Control'] })
+  await expect(solo).toHaveClass(/ring-2/)
+  await expect(page.getByText('1 selected')).toBeVisible()
+  await expect(page.getByRole('dialog', { name: 'Solo' })).not.toBeVisible()
+})
+
 /** Real PointerEvent drag with enough interpolated steps to clear the
  *  6 px activation threshold (same shape as drag-and-drop.spec). */
 async function dragBetween(
