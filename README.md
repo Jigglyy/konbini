@@ -6,6 +6,10 @@
 > **A kanban board that lives on your machine - and lets your AI move the cards.**
 > Offline-first. Plain text on disk. No cloud, no accounts, no telemetry.
 
+<p align="center">
+  <img src="docs/screenshots/board.png" alt="A Kanbini board with colour-coded lists, labelled cards, priorities, due dates, and a checklist preview" width="900">
+</p>
+
 Kanbini is a Trello-style kanban app built for one person and their AI.
 Your boards live in a local SQLite file and export to plain Markdown +
 JSON, so you own your data outright. A built-in **local MCP server** lets
@@ -32,6 +36,14 @@ that never closes: a board that's yours, local, and always on.
 - **AI-native.** A token-gated local MCP server exposes read/write tools;
   the AI's edits stream into the live UI as it works.
 - **Free and open source** under the [MIT license](LICENSE).
+
+## Screenshots
+
+| All your boards in one place | Card detail with checklists + comments |
+| :---: | :---: |
+| [![Boards home](docs/screenshots/home.png)](docs/screenshots/home.png) | [![Card detail](docs/screenshots/card-detail.png)](docs/screenshots/card-detail.png) |
+| **Swimlanes - group by priority** | **Cross-board command palette** |
+| [![Swimlanes](docs/screenshots/swimlanes.png)](docs/screenshots/swimlanes.png) | [![Command palette](docs/screenshots/command-palette.png)](docs/screenshots/command-palette.png) |
 
 ## Features
 
